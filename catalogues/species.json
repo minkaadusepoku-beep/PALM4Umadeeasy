@@ -1,0 +1,100 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "Tree species catalogue with PALM-compatible LAD profiles",
+    "sources": "palm_csd 87-species database, Lalic & Mihailovic (2004), Katul et al. (2004), literature compilation",
+    "lad_note": "LAD profiles are simplified as crown-layer averages. Full vertical profiles to be added in Phase 2."
+  },
+  "species": {
+    "tilia_cordata": {
+      "common_name": "Small-leaved linden",
+      "common_name_de": "Winterlinde",
+      "height_m": {"min": 8, "max": 20, "default": 15},
+      "crown_diameter_m": {"min": 6, "max": 12, "default": 9},
+      "trunk_height_m": {"min": 2, "max": 6, "default": 4},
+      "lad_max_m2m3": 1.4,
+      "palm_tree_type": 3,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "platanus_x_acerifolia": {
+      "common_name": "London plane",
+      "common_name_de": "Ahornblaettrige Platane",
+      "height_m": {"min": 10, "max": 30, "default": 20},
+      "crown_diameter_m": {"min": 8, "max": 18, "default": 12},
+      "trunk_height_m": {"min": 3, "max": 8, "default": 5},
+      "lad_max_m2m3": 1.2,
+      "palm_tree_type": 5,
+      "source": "Katul et al. 2004; PALM species DB"
+    },
+    "acer_platanoides": {
+      "common_name": "Norway maple",
+      "common_name_de": "Spitzahorn",
+      "height_m": {"min": 8, "max": 25, "default": 16},
+      "crown_diameter_m": {"min": 6, "max": 14, "default": 10},
+      "trunk_height_m": {"min": 2, "max": 6, "default": 4},
+      "lad_max_m2m3": 1.6,
+      "palm_tree_type": 1,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "quercus_robur": {
+      "common_name": "English oak",
+      "common_name_de": "Stieleiche",
+      "height_m": {"min": 10, "max": 30, "default": 20},
+      "crown_diameter_m": {"min": 8, "max": 20, "default": 14},
+      "trunk_height_m": {"min": 3, "max": 8, "default": 5},
+      "lad_max_m2m3": 1.1,
+      "palm_tree_type": 6,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "fagus_sylvatica": {
+      "common_name": "European beech",
+      "common_name_de": "Rotbuche",
+      "height_m": {"min": 10, "max": 30, "default": 22},
+      "crown_diameter_m": {"min": 8, "max": 16, "default": 12},
+      "trunk_height_m": {"min": 3, "max": 8, "default": 5},
+      "lad_max_m2m3": 1.8,
+      "palm_tree_type": 2,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "betula_pendula": {
+      "common_name": "Silver birch",
+      "common_name_de": "Haengebirke",
+      "height_m": {"min": 8, "max": 20, "default": 14},
+      "crown_diameter_m": {"min": 5, "max": 10, "default": 7},
+      "trunk_height_m": {"min": 2, "max": 6, "default": 4},
+      "lad_max_m2m3": 0.9,
+      "palm_tree_type": 7,
+      "source": "Katul et al. 2004; PALM species DB"
+    },
+    "fraxinus_excelsior": {
+      "common_name": "European ash",
+      "common_name_de": "Gemeine Esche",
+      "height_m": {"min": 10, "max": 30, "default": 20},
+      "crown_diameter_m": {"min": 6, "max": 15, "default": 10},
+      "trunk_height_m": {"min": 3, "max": 8, "default": 5},
+      "lad_max_m2m3": 1.0,
+      "palm_tree_type": 4,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "carpinus_betulus": {
+      "common_name": "European hornbeam",
+      "common_name_de": "Hainbuche",
+      "height_m": {"min": 6, "max": 20, "default": 12},
+      "crown_diameter_m": {"min": 5, "max": 12, "default": 8},
+      "trunk_height_m": {"min": 2, "max": 5, "default": 3},
+      "lad_max_m2m3": 1.5,
+      "palm_tree_type": 8,
+      "source": "Lalic & Mihailovic 2004; PALM species DB"
+    },
+    "robinia_pseudoacacia": {
+      "common_name": "Black locust",
+      "common_name_de": "Robinie",
+      "height_m": {"min": 8, "max": 25, "default": 16},
+      "crown_diameter_m": {"min": 6, "max": 12, "default": 9},
+      "trunk_height_m": {"min": 3, "max": 7, "default": 4},
+      "lad_max_m2m3": 0.8,
+      "palm_tree_type": 9,
+      "source": "Katul et al. 2004; PALM species DB"
+    }
+  }
+}

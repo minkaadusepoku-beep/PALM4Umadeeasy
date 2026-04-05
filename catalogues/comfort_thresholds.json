@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "sources": "VDI 3787 Blatt 2 (PET), Broede et al. 2012 (UTCI), Lawson 1975 / NEN 8100 (wind)"
+  },
+  "pet_vdi3787": [
+    {"min": null, "max": 4,  "perception": "Very cold",     "stress": "Extreme cold stress",   "color": "#0000B3"},
+    {"min": 4,    "max": 8,  "perception": "Cold",          "stress": "Strong cold stress",     "color": "#0033FF"},
+    {"min": 8,    "max": 13, "perception": "Cool",          "stress": "Moderate cold stress",   "color": "#66CCFF"},
+    {"min": 13,   "max": 18, "perception": "Slightly cool", "stress": "Slight cold stress",     "color": "#00FFFF"},
+    {"min": 18,   "max": 23, "perception": "Comfortable",   "stress": "No thermal stress",      "color": "#00CC00"},
+    {"min": 23,   "max": 29, "perception": "Slightly warm", "stress": "Slight heat stress",     "color": "#FFFF00"},
+    {"min": 29,   "max": 35, "perception": "Warm",          "stress": "Moderate heat stress",   "color": "#FF9900"},
+    {"min": 35,   "max": 41, "perception": "Hot",           "stress": "Strong heat stress",     "color": "#FF0000"},
+    {"min": 41,   "max": null,"perception": "Very hot",     "stress": "Extreme heat stress",    "color": "#990000"}
+  ],
+  "lawson_wind": [
+    {"max_wind_ms": 2.5,  "class": "A", "label": "Sitting (long)", "acceptable_for": "Outdoor dining, reading"},
+    {"max_wind_ms": 4.0,  "class": "B", "label": "Sitting (short)", "acceptable_for": "Coffee, waiting"},
+    {"max_wind_ms": 6.0,  "class": "C", "label": "Standing",        "acceptable_for": "Bus stops, window shopping"},
+    {"max_wind_ms": 8.0,  "class": "D", "label": "Walking",         "acceptable_for": "Pedestrian through-routes"},
+    {"max_wind_ms": null,  "class": "E", "label": "Uncomfortable",   "acceptable_for": "Unacceptable for pedestrians"}
+  ]
+}

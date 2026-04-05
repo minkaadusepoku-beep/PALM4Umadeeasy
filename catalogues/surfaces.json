@@ -1,0 +1,108 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "Surface type catalogue mapping to PALM vegetation_type and pavement_type integers",
+    "sources": "PALM documentation (vegetation_type 0-18, pavement_type 0-15)"
+  },
+  "surfaces": {
+    "asphalt": {
+      "display_name": "Asphalt",
+      "display_name_de": "Asphalt",
+      "palm_category": "pavement",
+      "palm_type_id": 1,
+      "albedo": 0.12,
+      "emissivity": 0.95,
+      "description": "Standard asphalt road surface"
+    },
+    "concrete": {
+      "display_name": "Concrete",
+      "display_name_de": "Beton",
+      "palm_category": "pavement",
+      "palm_type_id": 2,
+      "albedo": 0.30,
+      "emissivity": 0.92,
+      "description": "Concrete pavement or sidewalk"
+    },
+    "cobblestone": {
+      "display_name": "Cobblestone / sett",
+      "display_name_de": "Kopfsteinpflaster",
+      "palm_category": "pavement",
+      "palm_type_id": 3,
+      "albedo": 0.20,
+      "emissivity": 0.93,
+      "description": "Natural stone paving"
+    },
+    "gravel": {
+      "display_name": "Gravel",
+      "display_name_de": "Kies",
+      "palm_category": "pavement",
+      "palm_type_id": 5,
+      "albedo": 0.25,
+      "emissivity": 0.92,
+      "description": "Loose gravel surface"
+    },
+    "permeable_paving": {
+      "display_name": "Permeable paving",
+      "display_name_de": "Wasserdurchlaessiges Pflaster",
+      "palm_category": "pavement",
+      "palm_type_id": 4,
+      "albedo": 0.22,
+      "emissivity": 0.93,
+      "description": "Permeable interlocking pavers"
+    },
+    "grass": {
+      "display_name": "Grass / lawn",
+      "display_name_de": "Rasen",
+      "palm_category": "vegetation",
+      "palm_type_id": 3,
+      "albedo": 0.20,
+      "emissivity": 0.97,
+      "description": "Short grass or maintained lawn"
+    },
+    "meadow": {
+      "display_name": "Meadow / tall grass",
+      "display_name_de": "Wiese",
+      "palm_category": "vegetation",
+      "palm_type_id": 5,
+      "albedo": 0.18,
+      "emissivity": 0.97,
+      "description": "Tall grass or wildflower meadow"
+    },
+    "bare_soil": {
+      "display_name": "Bare soil",
+      "display_name_de": "Offener Boden",
+      "palm_category": "vegetation",
+      "palm_type_id": 1,
+      "albedo": 0.17,
+      "emissivity": 0.95,
+      "description": "Exposed soil without vegetation cover"
+    },
+    "sand": {
+      "display_name": "Sand",
+      "display_name_de": "Sand",
+      "palm_category": "pavement",
+      "palm_type_id": 6,
+      "albedo": 0.35,
+      "emissivity": 0.90,
+      "description": "Sandy surface (playground, beach)"
+    },
+    "water": {
+      "display_name": "Water",
+      "display_name_de": "Wasser",
+      "palm_category": "water",
+      "palm_type_id": 1,
+      "albedo": 0.08,
+      "emissivity": 0.98,
+      "description": "Open water surface (pond, pool)"
+    },
+    "tartan": {
+      "display_name": "Tartan / rubber surface",
+      "display_name_de": "Tartan / Gummibelag",
+      "palm_category": "pavement",
+      "palm_type_id": 7,
+      "albedo": 0.15,
+      "emissivity": 0.94,
+      "description": "Athletic track or playground rubber"
+    }
+  }
+}
