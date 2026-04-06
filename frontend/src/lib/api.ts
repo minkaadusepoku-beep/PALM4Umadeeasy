@@ -5,6 +5,8 @@ import type {
   Job,
   PETClassification,
   Project,
+  ProjectMember,
+  ProjectRole,
   Scenario,
   ScenarioRecord,
   SpeciesInfo,
@@ -116,6 +118,36 @@ export const projects = {
 };
 
 // ---------------------------------------------------------------------------
+// Project Members
+// ---------------------------------------------------------------------------
+
+export const members = {
+  list(projectId: number) {
+    return apiFetch<ProjectMember[]>(`/projects/${projectId}/members`);
+  },
+
+  add(projectId: number, email: string, role: ProjectRole = 'viewer') {
+    return apiFetch<ProjectMember>(`/projects/${projectId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ email, role }),
+    });
+  },
+
+  update(projectId: number, memberId: number, role: ProjectRole) {
+    return apiFetch<ProjectMember>(`/projects/${projectId}/members/${memberId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ role }),
+    });
+  },
+
+  remove(projectId: number, memberId: number) {
+    return apiFetch<void>(`/projects/${projectId}/members/${memberId}`, {
+      method: 'DELETE',
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
 
@@ -203,6 +235,14 @@ export const jobs = {
 
   getFieldUrl(id: number, variable: string, timestep: number): string {
     return `${API_BASE}/jobs/${id}/fields/${variable}/${timestep}`;
+  },
+
+  retry(id: number) {
+    return apiFetch<Job>(`/jobs/${id}/retry`, { method: 'POST' });
+  },
+
+  cancel(id: number) {
+    return apiFetch<Job>(`/jobs/${id}/cancel`, { method: 'POST' });
   },
 };
 

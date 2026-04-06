@@ -29,11 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import CATALOGUE_DIR, PROJECT_ROOT
 from ..db.database import get_db, init_db
-from ..db.models import Job, JobStatus, JobType, Project, ScenarioRecord, User
+from ..db.models import Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
 from ..models.scenario import Scenario, ComparisonRequest
 from ..validation.engine import validate_scenario
 from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresholds
-from ..workers.executor import run_job_background, get_job_progress
+from ..workers.executor import run_job_background, get_job_progress, ensure_embedded_worker
 from .auth import create_access_token, get_password_hash, verify_password
 from .deps import get_current_user
 
@@ -55,6 +55,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup() -> None:
     await init_db()
+    ensure_embedded_worker()
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +114,22 @@ class CompareJobRequest(BaseModel):
 class JobResponse(BaseModel):
     job_id: int
     status: str
+
+
+class AddMemberRequest(BaseModel):
+    email: str
+    role: str = "viewer"
+
+
+class UpdateMemberRequest(BaseModel):
+    role: str
+
+
+class MemberResponse(BaseModel):
+    id: int
+    user_id: int
+    email: str
+    role: str
 
 
 class BBoxInput(BaseModel):
@@ -199,6 +216,10 @@ async def create_project(
     project = Project(name=body.name, description=body.description, user_id=user.id)
     db.add(project)
     await db.flush()
+    # Auto-create owner membership
+    membership = ProjectMember(project_id=project.id, user_id=user.id, role=ProjectRole.owner)
+    db.add(membership)
+    await db.flush()
     return ProjectResponse(id=project.id, name=project.name, description=project.description)
 
 
@@ -207,10 +228,14 @@ async def list_projects(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ProjectResponse]:
+    # Show projects where user is owner OR has a membership
     stmt = (
         select(Project, func.count(ScenarioRecord.id).label("scenario_count"))
         .outerjoin(ScenarioRecord, ScenarioRecord.project_id == Project.id)
-        .where(Project.user_id == user.id)
+        .outerjoin(ProjectMember, ProjectMember.project_id == Project.id)
+        .where(
+            (Project.user_id == user.id) | (ProjectMember.user_id == user.id)
+        )
         .group_by(Project.id)
     )
     rows = (await db.execute(stmt)).all()
@@ -231,10 +256,11 @@ async def get_project(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectResponse:
+    await _verify_project_access(project_id, user, db, min_role="viewer")
     stmt = (
         select(Project, func.count(ScenarioRecord.id).label("scenario_count"))
         .outerjoin(ScenarioRecord, ScenarioRecord.project_id == Project.id)
-        .where(Project.id == project_id, Project.user_id == user.id)
+        .where(Project.id == project_id)
         .group_by(Project.id)
     )
     row = (await db.execute(stmt)).first()
@@ -254,8 +280,9 @@ async def delete_project(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    await _verify_project_access(project_id, user, db, min_role="owner")
     result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        select(Project).where(Project.id == project_id)
     )
     project = result.scalar_one_or_none()
     if not project:
@@ -264,19 +291,175 @@ async def delete_project(
 
 
 # ---------------------------------------------------------------------------
+# Project member routes (/api/projects/{project_id}/members)
+# ---------------------------------------------------------------------------
+
+_ROLE_HIERARCHY = {"viewer": 0, "editor": 1, "owner": 2}
+
+
+@app.get("/api/projects/{project_id}/members", response_model=list[MemberResponse])
+async def list_members(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[MemberResponse]:
+    await _verify_project_access(project_id, user, db, min_role="viewer")
+    result = await db.execute(
+        select(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+    )
+    rows = result.all()
+    return [
+        MemberResponse(
+            id=row.ProjectMember.id,
+            user_id=row.User.id,
+            email=row.User.email,
+            role=row.ProjectMember.role.value,
+        )
+        for row in rows
+    ]
+
+
+@app.post("/api/projects/{project_id}/members", response_model=MemberResponse, status_code=201)
+async def add_member(
+    project_id: int,
+    body: AddMemberRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemberResponse:
+    await _verify_project_access(project_id, user, db, min_role="owner")
+
+    if body.role not in ("viewer", "editor"):
+        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
+
+    # Find user by email
+    result = await db.execute(select(User).where(User.email == body.email))
+    target_user = result.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Check not already a member
+    existing = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == target_user.id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="User is already a member")
+
+    role = ProjectRole(body.role)
+    membership = ProjectMember(project_id=project_id, user_id=target_user.id, role=role)
+    db.add(membership)
+    await db.flush()
+    return MemberResponse(
+        id=membership.id,
+        user_id=target_user.id,
+        email=target_user.email,
+        role=role.value,
+    )
+
+
+@app.put("/api/projects/{project_id}/members/{member_id}", response_model=MemberResponse)
+async def update_member(
+    project_id: int,
+    member_id: int,
+    body: UpdateMemberRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemberResponse:
+    await _verify_project_access(project_id, user, db, min_role="owner")
+
+    if body.role not in ("viewer", "editor"):
+        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
+
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.id == member_id,
+            ProjectMember.project_id == project_id,
+        )
+    )
+    membership = result.scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if membership.role == ProjectRole.owner:
+        raise HTTPException(status_code=400, detail="Cannot change owner role")
+
+    membership.role = ProjectRole(body.role)
+    await db.flush()
+
+    target = await db.execute(select(User).where(User.id == membership.user_id))
+    target_user = target.scalar_one()
+    return MemberResponse(
+        id=membership.id,
+        user_id=target_user.id,
+        email=target_user.email,
+        role=membership.role.value,
+    )
+
+
+@app.delete("/api/projects/{project_id}/members/{member_id}", status_code=204)
+async def remove_member(
+    project_id: int,
+    member_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _verify_project_access(project_id, user, db, min_role="owner")
+
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.id == member_id,
+            ProjectMember.project_id == project_id,
+        )
+    )
+    membership = result.scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if membership.role == ProjectRole.owner:
+        raise HTTPException(status_code=400, detail="Cannot remove the project owner")
+
+    await db.delete(membership)
+
+
+# ---------------------------------------------------------------------------
 # Scenario routes (/api/projects/{project_id}/scenarios)
 # ---------------------------------------------------------------------------
 
+
 async def _verify_project_access(
-    project_id: int, user: User, db: AsyncSession
-) -> Project:
+    project_id: int,
+    user: User,
+    db: AsyncSession,
+    min_role: str = "viewer",
+) -> ProjectRole:
+    """Check user has at least `min_role` on the project. Returns actual role."""
+    # Check membership table first
     result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user.id,
+        )
     )
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    member = result.scalar_one_or_none()
+
+    if member:
+        role = member.role
+    else:
+        # Fallback: legacy owner check (projects created before RBAC)
+        proj = await db.execute(
+            select(Project).where(Project.id == project_id, Project.user_id == user.id)
+        )
+        if proj.scalar_one_or_none():
+            role = ProjectRole.owner
+        else:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    if _ROLE_HIERARCHY[role.value] < _ROLE_HIERARCHY[min_role]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    return role
 
 
 @app.post("/api/projects/{project_id}/scenarios", response_model=ScenarioResponse, status_code=201)
@@ -286,7 +469,7 @@ async def create_scenario(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ScenarioResponse:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="editor")
     scenario = Scenario(**body.scenario_json)
     record = ScenarioRecord(
         project_id=project_id,
@@ -310,7 +493,7 @@ async def list_scenarios(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ScenarioResponse]:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="viewer")
     result = await db.execute(
         select(ScenarioRecord).where(ScenarioRecord.project_id == project_id)
     )
@@ -333,7 +516,7 @@ async def get_scenario(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ScenarioResponse:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="viewer")
     result = await db.execute(
         select(ScenarioRecord).where(
             ScenarioRecord.id == scenario_id,
@@ -359,7 +542,7 @@ async def update_scenario(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ScenarioResponse:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="editor")
     result = await db.execute(
         select(ScenarioRecord).where(
             ScenarioRecord.id == scenario_id,
@@ -390,7 +573,7 @@ async def delete_scenario(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="editor")
     result = await db.execute(
         select(ScenarioRecord).where(
             ScenarioRecord.id == scenario_id,
@@ -410,7 +593,7 @@ async def validate_scenario_endpoint(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    await _verify_project_access(project_id, user, db)
+    await _verify_project_access(project_id, user, db, min_role="viewer")
     result = await db.execute(
         select(ScenarioRecord).where(
             ScenarioRecord.id == scenario_id,
@@ -447,12 +630,14 @@ async def run_job(
     if not record:
         raise HTTPException(status_code=404, detail="Scenario not found")
 
+    await _verify_project_access(record.project_id, user, db, min_role="editor")
+
     job = Job(
         user_id=user.id,
         project_id=record.project_id,
         job_type=JobType.single,
         baseline_scenario_id=record.id,
-        status=JobStatus.pending,
+        status=JobStatus.queued,
     )
     db.add(job)
     await db.flush()
@@ -482,13 +667,15 @@ async def compare_job(
     if baseline.project_id != intervention.project_id:
         raise HTTPException(status_code=400, detail="Scenarios must belong to the same project")
 
+    await _verify_project_access(baseline.project_id, user, db, min_role="editor")
+
     job = Job(
         user_id=user.id,
         project_id=baseline.project_id,
         job_type=JobType.comparison,
         baseline_scenario_id=baseline.id,
         intervention_scenario_id=intervention.id,
-        status=JobStatus.pending,
+        status=JobStatus.queued,
     )
     db.add(job)
     await db.flush()
@@ -503,8 +690,12 @@ async def list_jobs(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    # Show jobs from projects where user is owner or member
     result = await db.execute(
-        select(Job).where(Job.user_id == user.id).order_by(Job.created_at.desc())
+        select(Job)
+        .outerjoin(ProjectMember, (ProjectMember.project_id == Job.project_id) & (ProjectMember.user_id == user.id))
+        .where((Job.user_id == user.id) | (ProjectMember.user_id == user.id))
+        .order_by(Job.created_at.desc())
     )
     jobs = result.scalars().all()
     return [
@@ -516,8 +707,12 @@ async def list_jobs(
             "baseline_scenario_id": j.baseline_scenario_id,
             "intervention_scenario_id": j.intervention_scenario_id,
             "created_at": j.created_at.isoformat() if j.created_at else None,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
             "completed_at": j.completed_at.isoformat() if j.completed_at else None,
             "error_message": j.error_message,
+            "worker_id": j.worker_id,
+            "retry_count": j.retry_count,
+            "priority": j.priority,
         }
         for j in jobs
     ]
@@ -529,12 +724,11 @@ async def get_job(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
+    result = await db.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
 
     summary = json.loads(job.result_json) if job.result_json else None
     return {
@@ -550,6 +744,10 @@ async def get_job(
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "worker_id": job.worker_id,
+        "retry_count": job.retry_count,
+        "max_retries": job.max_retries,
+        "priority": job.priority,
     }
 
 
@@ -559,12 +757,11 @@ async def get_job_results(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
+    result = await db.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
     if job.status != JobStatus.completed:
         raise HTTPException(status_code=409, detail="Job has not completed")
     if not job.result_json:
@@ -581,12 +778,11 @@ async def get_field_geotiff(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
+    result = await db.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
     if job.status != JobStatus.completed:
         raise HTTPException(status_code=409, detail="Job has not completed")
     if not job.output_dir:
@@ -671,6 +867,63 @@ async def get_comparison_results(
 
 
 # ---------------------------------------------------------------------------
+# Job retry / cancel
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/jobs/{job_id}/retry", response_model=JobResponse)
+async def retry_job(
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobResponse:
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="editor")
+
+    if job.status not in (JobStatus.failed, JobStatus.cancelled):
+        raise HTTPException(status_code=400, detail="Only failed or cancelled jobs can be retried")
+
+    job.status = JobStatus.queued
+    job.worker_id = None
+    job.last_heartbeat = None
+    job.started_at = None
+    job.completed_at = None
+    job.error_message = None
+    job.retry_count = 0
+    await db.flush()
+
+    run_job_background(job.id)
+
+    return JobResponse(job_id=job.id, status=job.status.value)
+
+
+@app.post("/api/jobs/{job_id}/cancel", response_model=JobResponse)
+async def cancel_job(
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> JobResponse:
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="editor")
+
+    if job.status != JobStatus.queued:
+        raise HTTPException(status_code=400, detail="Only queued jobs can be cancelled")
+
+    from datetime import datetime, timezone
+    job.status = JobStatus.cancelled
+    job.completed_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    return JobResponse(job_id=job.id, status=job.status.value)
+
+
+# ---------------------------------------------------------------------------
 # Export routes (/api/exports)
 # ---------------------------------------------------------------------------
 
@@ -680,12 +933,11 @@ async def export_pdf(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
+    result = await db.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
     if not job.output_dir:
         raise HTTPException(status_code=404, detail="No output directory")
 
@@ -709,12 +961,11 @@ async def export_geotiff(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
+    result = await db.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
     if job.status != JobStatus.completed:
         raise HTTPException(status_code=409, detail="Job has not completed")
     if not job.output_dir:

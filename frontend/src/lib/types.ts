@@ -3,7 +3,7 @@
 export type DataQualityTier = 'screening' | 'project' | 'research';
 export type ForcingArchetype = 'typical_hot_day' | 'heat_wave_day' | 'moderate_summer_day' | 'warm_night';
 export type ScenarioType = 'baseline' | 'single_intervention' | 'concept_comparison';
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type JobStatus = 'queued' | 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type JobType = 'single' | 'comparison';
 
 export interface BoundingBox { west: number; south: number; east: number; north: number; }
@@ -144,6 +144,15 @@ export interface Job {
   created_at: string;
   started_at?: string;
   completed_at?: string;
+}
+
+export type ProjectRole = 'owner' | 'editor' | 'viewer';
+
+export interface ProjectMember {
+  id: number;
+  user_id: number;
+  email: string;
+  role: ProjectRole;
 }
 
 export interface SpeciesInfo {

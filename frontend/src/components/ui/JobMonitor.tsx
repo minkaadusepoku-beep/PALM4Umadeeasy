@@ -122,7 +122,7 @@ export default function JobMonitor({ jobId, onComplete }: JobMonitorProps) {
     );
   }
 
-  if (!job || job.status === 'pending' || job.status === 'running') {
+  if (!job || job.status === 'queued' || job.status === 'pending' || job.status === 'running') {
     return (
       <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
         {/* Spinner */}

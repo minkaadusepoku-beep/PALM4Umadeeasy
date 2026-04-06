@@ -98,7 +98,7 @@ export default function ResultsPage() {
       setJob(j);
       if (j.status === "completed") {
         loadResults(j);
-      } else if (j.status === "pending" || j.status === "running") {
+      } else if (j.status === "queued" || j.status === "pending" || j.status === "running") {
         pollRef.current = setInterval(async () => {
           const updated = await jobsApi.get(jobId);
           setJob(updated);
@@ -137,7 +137,7 @@ export default function ResultsPage() {
     );
   }
 
-  if (job.status === "pending" || job.status === "running") {
+  if (job.status === "queued" || job.status === "pending" || job.status === "running") {
     return (
       <div className="flex-1 flex items-center justify-center" data-testid="job-monitor">
         <div className="text-center">
@@ -415,7 +415,7 @@ export default function ResultsPage() {
                   {(() => {
                     const deltas = Array.isArray(results.delta_statistics)
                       ? results.delta_statistics
-                      : Object.entries(results.delta_statistics).map(([variable, d]) => ({ variable, ...d }));
+                      : Object.entries(results.delta_statistics).map(([key, d]) => ({ ...d, variable: key }));
                     return deltas.map((d) => (
                       <tr key={d.variable} className="border-b border-slate-700/50">
                         <td className="px-4 py-2">{d.variable}</td>

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 # Override DB URL before importing app
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
+os.environ["PALM4U_EXTERNAL_WORKERS"] = "1"  # Disable embedded worker in tests
 
 from src.db.database import Base, get_db  # noqa: E402
 from src.api.main import app  # noqa: E402
@@ -95,10 +96,10 @@ VALID_INTERVENTION_JSON = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def register_and_get_token(client: AsyncClient) -> str:
+async def register_and_get_token(client: AsyncClient, email: str = "test@example.com") -> str:
     resp = await client.post(
         "/api/auth/register",
-        json={"email": "test@example.com", "password": "password123"},
+        json={"email": email, "password": "password123"},
     )
     assert resp.status_code == 200
     return resp.json()["access_token"]
@@ -463,7 +464,7 @@ class TestJobs:
         )
         assert resp.status_code == 202
         data = resp.json()
-        assert data["status"] == "pending"
+        assert data["status"] == "queued"
         assert data["job_id"] > 0
 
     @pytest.mark.asyncio
@@ -490,7 +491,7 @@ class TestJobs:
         )
         assert resp.status_code == 202
         data = resp.json()
-        assert data["status"] == "pending"
+        assert data["status"] == "queued"
 
     @pytest.mark.asyncio
     async def test_list_jobs(self, client):
@@ -556,6 +557,109 @@ class TestJobs:
 
 
 # ---------------------------------------------------------------------------
+# Job queue operations tests
+# ---------------------------------------------------------------------------
+
+
+class TestJobQueue:
+
+    async def _create_job(self, client, token):
+        """Helper: register, create project+scenario, run job, return (token, job_id)."""
+        proj = await client.post(
+            "/api/projects",
+            json={"name": "Queue Test", "description": "test"},
+            headers=auth_header(token),
+        )
+        pid = proj.json()["id"]
+        sc = await client.post(
+            f"/api/projects/{pid}/scenarios",
+            json={"scenario_json": VALID_SCENARIO_JSON},
+            headers=auth_header(token),
+        )
+        sid = sc.json()["id"]
+        run_resp = await client.post(
+            "/api/jobs/run",
+            json={"scenario_id": sid},
+            headers=auth_header(token),
+        )
+        return run_resp.json()["job_id"]
+
+    @pytest.mark.asyncio
+    async def test_cancel_queued_job(self, client):
+        token = await register_and_get_token(client, "cancel1@test.com")
+        job_id = await self._create_job(client, token)
+
+        resp = await client.post(f"/api/jobs/{job_id}/cancel", headers=auth_header(token))
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_non_queued_fails(self, client):
+        token = await register_and_get_token(client, "cancel2@test.com")
+        job_id = await self._create_job(client, token)
+
+        # Cancel it first
+        await client.post(f"/api/jobs/{job_id}/cancel", headers=auth_header(token))
+
+        # Try to cancel again (now cancelled, not queued)
+        resp = await client.post(f"/api/jobs/{job_id}/cancel", headers=auth_header(token))
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_retry_cancelled_job(self, client):
+        token = await register_and_get_token(client, "retry1@test.com")
+        job_id = await self._create_job(client, token)
+
+        # Cancel then retry
+        await client.post(f"/api/jobs/{job_id}/cancel", headers=auth_header(token))
+        resp = await client.post(f"/api/jobs/{job_id}/retry", headers=auth_header(token))
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "queued"
+
+    @pytest.mark.asyncio
+    async def test_retry_queued_job_fails(self, client):
+        token = await register_and_get_token(client, "retry2@test.com")
+        job_id = await self._create_job(client, token)
+
+        # Job is queued, retry should fail
+        resp = await client.post(f"/api/jobs/{job_id}/retry", headers=auth_header(token))
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_job_includes_queue_fields(self, client):
+        token = await register_and_get_token(client, "qfields@test.com")
+        job_id = await self._create_job(client, token)
+
+        resp = await client.get(f"/api/jobs/{job_id}", headers=auth_header(token))
+        data = resp.json()
+        assert "worker_id" in data
+        assert "retry_count" in data
+        assert "max_retries" in data
+        assert "priority" in data
+        assert data["retry_count"] == 0
+        assert data["priority"] == 0
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_cancel(self, client):
+        owner_token = await register_and_get_token(client, "qown@test.com")
+        viewer_token = await register_and_get_token(client, "qview@test.com")
+        job_id = await self._create_job(client, owner_token)
+
+        # Add viewer to project
+        jobs_resp = await client.get(f"/api/jobs/{job_id}", headers=auth_header(owner_token))
+        pid = jobs_resp.json()["project_id"]
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "qview@test.com", "role": "viewer"},
+            headers=auth_header(owner_token),
+        )
+
+        # Viewer tries to cancel
+        resp = await client.post(f"/api/jobs/{job_id}/cancel", headers=auth_header(viewer_token))
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Data fetch tests
 # ---------------------------------------------------------------------------
 
@@ -601,3 +705,305 @@ class TestExports:
             "/api/exports/jobs/9999/geotiff/theta", headers=auth_header(token)
         )
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# RBAC tests
+# ---------------------------------------------------------------------------
+
+
+async def register_user(client: AsyncClient, email: str, password: str = "pass1234") -> str:
+    resp = await client.post("/api/auth/register", json={"email": email, "password": password})
+    assert resp.status_code == 200
+    return resp.json()["access_token"]
+
+
+class TestRBAC:
+
+    @pytest.mark.asyncio
+    async def test_owner_auto_membership(self, client):
+        """Creating a project auto-creates owner membership."""
+        token = await register_user(client, "owner@test.com")
+        h = auth_header(token)
+        resp = await client.post("/api/projects", json={"name": "RBAC Test"}, headers=h)
+        assert resp.status_code == 201
+        pid = resp.json()["id"]
+
+        members = await client.get(f"/api/projects/{pid}/members", headers=h)
+        assert members.status_code == 200
+        data = members.json()
+        assert len(data) == 1
+        assert data[0]["email"] == "owner@test.com"
+        assert data[0]["role"] == "owner"
+
+    @pytest.mark.asyncio
+    async def test_add_viewer_member(self, client):
+        """Owner can add a viewer to the project."""
+        owner_token = await register_user(client, "owner2@test.com")
+        viewer_token = await register_user(client, "viewer@test.com")
+        oh = auth_header(owner_token)
+        vh = auth_header(viewer_token)
+
+        resp = await client.post("/api/projects", json={"name": "Shared"}, headers=oh)
+        pid = resp.json()["id"]
+
+        # Add viewer
+        add = await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "viewer@test.com", "role": "viewer"},
+            headers=oh,
+        )
+        assert add.status_code == 201
+        assert add.json()["role"] == "viewer"
+
+        # Viewer can see the project
+        proj = await client.get(f"/api/projects/{pid}", headers=vh)
+        assert proj.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_create_scenario(self, client):
+        """Viewer cannot create scenarios (requires editor)."""
+        owner_token = await register_user(client, "own3@test.com")
+        viewer_token = await register_user(client, "view3@test.com")
+        oh = auth_header(owner_token)
+        vh = auth_header(viewer_token)
+
+        resp = await client.post("/api/projects", json={"name": "ReadOnly"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "view3@test.com", "role": "viewer"},
+            headers=oh,
+        )
+
+        # Viewer tries to create scenario
+        create = await client.post(
+            f"/api/projects/{pid}/scenarios",
+            json={"scenario_json": VALID_SCENARIO_JSON},
+            headers=vh,
+        )
+        assert create.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_editor_can_create_scenario(self, client):
+        """Editor can create scenarios."""
+        owner_token = await register_user(client, "own4@test.com")
+        editor_token = await register_user(client, "edit4@test.com")
+        oh = auth_header(owner_token)
+        eh = auth_header(editor_token)
+
+        resp = await client.post("/api/projects", json={"name": "Editable"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "edit4@test.com", "role": "editor"},
+            headers=oh,
+        )
+
+        create = await client.post(
+            f"/api/projects/{pid}/scenarios",
+            json={"scenario_json": VALID_SCENARIO_JSON},
+            headers=eh,
+        )
+        assert create.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_viewer_can_list_scenarios(self, client):
+        """Viewer can read scenarios."""
+        owner_token = await register_user(client, "own5@test.com")
+        viewer_token = await register_user(client, "view5@test.com")
+        oh = auth_header(owner_token)
+        vh = auth_header(viewer_token)
+
+        resp = await client.post("/api/projects", json={"name": "ViewScens"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "view5@test.com", "role": "viewer"},
+            headers=oh,
+        )
+
+        # Owner creates a scenario
+        await client.post(
+            f"/api/projects/{pid}/scenarios",
+            json={"scenario_json": VALID_SCENARIO_JSON},
+            headers=oh,
+        )
+
+        # Viewer can list
+        scens = await client.get(f"/api/projects/{pid}/scenarios", headers=vh)
+        assert scens.status_code == 200
+        assert len(scens.json()) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_member_cannot_access(self, client):
+        """User with no membership gets 404."""
+        owner_token = await register_user(client, "own6@test.com")
+        outsider_token = await register_user(client, "outsider6@test.com")
+        oh = auth_header(owner_token)
+        xh = auth_header(outsider_token)
+
+        resp = await client.post("/api/projects", json={"name": "Private"}, headers=oh)
+        pid = resp.json()["id"]
+
+        get = await client.get(f"/api/projects/{pid}", headers=xh)
+        assert get.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_only_owner_can_delete_project(self, client):
+        """Editor cannot delete project."""
+        owner_token = await register_user(client, "own7@test.com")
+        editor_token = await register_user(client, "edit7@test.com")
+        oh = auth_header(owner_token)
+        eh = auth_header(editor_token)
+
+        resp = await client.post("/api/projects", json={"name": "OnlyOwnerDeletes"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "edit7@test.com", "role": "editor"},
+            headers=oh,
+        )
+
+        delete = await client.delete(f"/api/projects/{pid}", headers=eh)
+        assert delete.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_only_owner_can_manage_members(self, client):
+        """Editor cannot add members."""
+        owner_token = await register_user(client, "own8@test.com")
+        editor_token = await register_user(client, "edit8@test.com")
+        await register_user(client, "extra8@test.com")
+        oh = auth_header(owner_token)
+        eh = auth_header(editor_token)
+
+        resp = await client.post("/api/projects", json={"name": "MembMgmt"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "edit8@test.com", "role": "editor"},
+            headers=oh,
+        )
+
+        # Editor tries to add a member
+        add = await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "extra8@test.com", "role": "viewer"},
+            headers=eh,
+        )
+        assert add.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_cannot_remove_owner(self, client):
+        """Cannot remove the owner membership."""
+        token = await register_user(client, "own9@test.com")
+        h = auth_header(token)
+
+        resp = await client.post("/api/projects", json={"name": "NoRemoveOwner"}, headers=h)
+        pid = resp.json()["id"]
+
+        members = await client.get(f"/api/projects/{pid}/members", headers=h)
+        owner_member_id = members.json()[0]["id"]
+
+        delete = await client.delete(f"/api/projects/{pid}/members/{owner_member_id}", headers=h)
+        assert delete.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_update_member_role(self, client):
+        """Owner can change viewer to editor."""
+        owner_token = await register_user(client, "own10@test.com")
+        viewer_token = await register_user(client, "view10@test.com")
+        oh = auth_header(owner_token)
+
+        resp = await client.post("/api/projects", json={"name": "RoleChange"}, headers=oh)
+        pid = resp.json()["id"]
+
+        add = await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "view10@test.com", "role": "viewer"},
+            headers=oh,
+        )
+        mid = add.json()["id"]
+
+        update = await client.put(
+            f"/api/projects/{pid}/members/{mid}",
+            json={"role": "editor"},
+            headers=oh,
+        )
+        assert update.status_code == 200
+        assert update.json()["role"] == "editor"
+
+    @pytest.mark.asyncio
+    async def test_remove_member(self, client):
+        """Owner can remove a member."""
+        owner_token = await register_user(client, "own11@test.com")
+        viewer_token = await register_user(client, "view11@test.com")
+        oh = auth_header(owner_token)
+
+        resp = await client.post("/api/projects", json={"name": "RemoveMem"}, headers=oh)
+        pid = resp.json()["id"]
+
+        add = await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "view11@test.com", "role": "viewer"},
+            headers=oh,
+        )
+        mid = add.json()["id"]
+
+        delete = await client.delete(f"/api/projects/{pid}/members/{mid}", headers=oh)
+        assert delete.status_code == 204
+
+        # Verify removed
+        members = await client.get(f"/api/projects/{pid}/members", headers=oh)
+        emails = [m["email"] for m in members.json()]
+        assert "view11@test.com" not in emails
+
+    @pytest.mark.asyncio
+    async def test_shared_project_visible_in_list(self, client):
+        """Shared projects appear in viewer's project list."""
+        owner_token = await register_user(client, "own12@test.com")
+        viewer_token = await register_user(client, "view12@test.com")
+        oh = auth_header(owner_token)
+        vh = auth_header(viewer_token)
+
+        resp = await client.post("/api/projects", json={"name": "SharedVis"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "view12@test.com", "role": "viewer"},
+            headers=oh,
+        )
+
+        projects = await client.get("/api/projects", headers=vh)
+        assert projects.status_code == 200
+        names = [p["name"] for p in projects.json()]
+        assert "SharedVis" in names
+
+    @pytest.mark.asyncio
+    async def test_duplicate_member_rejected(self, client):
+        """Adding same user twice is rejected."""
+        owner_token = await register_user(client, "own13@test.com")
+        await register_user(client, "dup13@test.com")
+        oh = auth_header(owner_token)
+
+        resp = await client.post("/api/projects", json={"name": "NoDups"}, headers=oh)
+        pid = resp.json()["id"]
+
+        await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "dup13@test.com", "role": "viewer"},
+            headers=oh,
+        )
+
+        dup = await client.post(
+            f"/api/projects/{pid}/members",
+            json={"email": "dup13@test.com", "role": "editor"},
+            headers=oh,
+        )
+        assert dup.status_code == 400
