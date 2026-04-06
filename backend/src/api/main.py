@@ -37,6 +37,7 @@ from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresh
 from ..monitoring.health import get_health
 from ..monitoring.metrics import collect_metrics
 from ..monitoring.logging_config import setup_logging, generate_request_id, request_id_var
+from ..science.wind_comfort import generate_stub_wind_comfort, get_category_legend
 from ..security.password import validate_password, PasswordValidationError
 from ..security.audit import log_action
 from ..security.rate_limit import auth_limiter
@@ -945,6 +946,29 @@ async def get_comparison_results(
 # ---------------------------------------------------------------------------
 # Job retry / cancel
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/jobs/{job_id}/wind-comfort")
+async def get_wind_comfort(
+    job_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _verify_project_access(job.project_id, user, db, min_role="viewer")
+    if job.status != JobStatus.completed:
+        raise HTTPException(status_code=409, detail="Job has not completed")
+
+    # In stub mode, generate synthetic wind comfort data
+    return generate_stub_wind_comfort()
+
+
+@app.get("/api/catalogues/wind-comfort-legend")
+async def wind_comfort_legend() -> list[dict]:
+    return get_category_legend()
 
 
 @app.post("/api/jobs/{job_id}/retry", response_model=JobResponse)
