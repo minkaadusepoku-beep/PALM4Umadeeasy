@@ -50,6 +50,9 @@ from .deps import get_current_user
 
 app = FastAPI(title="PALM4Umadeeasy", version="0.1.0")
 
+from starlette.middleware.gzip import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],
@@ -255,19 +258,25 @@ async def me(user: User = Depends(get_current_user)) -> UserResponse:
 # Catalogue routes (/api/catalogues)
 # ---------------------------------------------------------------------------
 
+from starlette.responses import JSONResponse
+
+def _cached_json(data: dict, max_age: int = 3600) -> JSONResponse:
+    return JSONResponse(content=data, headers={"Cache-Control": f"public, max-age={max_age}"})
+
+
 @app.get("/api/catalogues/species")
-async def get_species_catalogue() -> dict[str, Any]:
-    return load_species()
+async def get_species_catalogue() -> JSONResponse:
+    return _cached_json(load_species())
 
 
 @app.get("/api/catalogues/surfaces")
-async def get_surfaces_catalogue() -> dict[str, Any]:
-    return load_surfaces()
+async def get_surfaces_catalogue() -> JSONResponse:
+    return _cached_json(load_surfaces())
 
 
 @app.get("/api/catalogues/comfort-thresholds")
-async def get_comfort_thresholds() -> dict[str, Any]:
-    return load_comfort_thresholds()
+async def get_comfort_thresholds() -> JSONResponse:
+    return _cached_json(load_comfort_thresholds())
 
 
 # ---------------------------------------------------------------------------
