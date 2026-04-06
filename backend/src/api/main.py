@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import CATALOGUE_DIR, PROJECT_ROOT
 from ..db.database import get_db, init_db
-from ..db.models import Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
+from ..db.models import AuditLog, Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
 from ..models.scenario import Scenario, ComparisonRequest
 from ..validation.engine import validate_scenario
 from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresholds
@@ -1192,6 +1192,86 @@ async def fetch_dem(body: DEMRequest) -> dict[str, Any]:
         "default_elevation_m": 0.0,
         "source": "Copernicus GLO-30 DEM (deferred)",
     }
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Admin routes (/api/admin) — requires is_admin flag
+# ---------------------------------------------------------------------------
+
+
+async def _require_admin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+@app.get("/api/admin/queue-stats")
+async def admin_queue_stats(
+    user: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(
+        select(Job.status, func.count(Job.id)).group_by(Job.status)
+    )
+    counts = {row[0].value: row[1] for row in result.all()}
+
+    # Stale workers
+    from datetime import datetime as dt, timezone as tz, timedelta as td
+    cutoff = dt.now(tz.utc) - td(seconds=120)
+    stale = await db.execute(
+        select(func.count(Job.id)).where(
+            Job.status == JobStatus.running,
+            Job.last_heartbeat < cutoff,
+        )
+    )
+    stale_count = stale.scalar() or 0
+
+    # Active workers
+    active = await db.execute(
+        select(func.count(func.distinct(Job.worker_id))).where(
+            Job.status == JobStatus.running,
+            Job.worker_id.isnot(None),
+        )
+    )
+    active_count = active.scalar() or 0
+
+    return {
+        "jobs": counts,
+        "stale_workers": stale_count,
+        "active_workers": active_count,
+    }
+
+
+@app.get("/api/admin/audit-log")
+async def admin_audit_log(
+    limit: int = 50,
+    offset: int = 0,
+    action: str | None = None,
+    user: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc())
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    stmt = stmt.offset(offset).limit(min(limit, 200))
+
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
+    return [
+        {
+            "id": log.id,
+            "user_id": log.user_id,
+            "action": log.action,
+            "resource_type": log.resource_type,
+            "resource_id": log.resource_id,
+            "detail": log.detail,
+            "ip_address": log.ip_address,
+            "request_id": log.request_id,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        }
+        for log in logs
+    ]
 
 
 # ---------------------------------------------------------------------------

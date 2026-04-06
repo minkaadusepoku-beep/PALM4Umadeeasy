@@ -297,3 +297,47 @@ export const catalogues = {
     return apiFetch<unknown>('/catalogues/comfort-thresholds');
   },
 };
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+interface QueueStats {
+  jobs: Record<string, number>;
+  stale_workers: number;
+  active_workers: number;
+}
+
+interface AuditLogEntry {
+  id: number;
+  user_id: number | null;
+  action: string;
+  resource_type: string;
+  resource_id: number | null;
+  detail: string | null;
+  ip_address: string | null;
+  request_id: string | null;
+  created_at: string | null;
+}
+
+interface HealthResponse {
+  status: string;
+  timestamp: string;
+  components: Record<string, { status: string; [key: string]: unknown }>;
+}
+
+export const admin = {
+  queueStats() {
+    return apiFetch<QueueStats>('/admin/queue-stats');
+  },
+
+  auditLog(limit = 50, offset = 0, action?: string) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (action) params.set('action', action);
+    return apiFetch<AuditLogEntry[]>(`/admin/audit-log?${params}`);
+  },
+
+  health() {
+    return apiFetch<HealthResponse>('/health');
+  },
+};
