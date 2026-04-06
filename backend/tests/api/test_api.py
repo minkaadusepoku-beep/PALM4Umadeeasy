@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # Override DB URL before importing app
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
 os.environ["PALM4U_EXTERNAL_WORKERS"] = "1"  # Disable embedded worker in tests
+os.environ["PALM4U_AUTH_RATE_LIMIT"] = "10000"  # Disable rate limiting in tests
 
 from src.db.database import Base, get_db  # noqa: E402
 from src.api.main import app  # noqa: E402
@@ -99,7 +100,7 @@ VALID_INTERVENTION_JSON = {
 async def register_and_get_token(client: AsyncClient, email: str = "test@example.com") -> str:
     resp = await client.post(
         "/api/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "Test1234"},
     )
     assert resp.status_code == 200
     return resp.json()["access_token"]
@@ -120,7 +121,7 @@ class TestAuth:
     async def test_register(self, client):
         resp = await client.post(
             "/api/auth/register",
-            json={"email": "new@example.com", "password": "pass123"},
+            json={"email": "new@example.com", "password": "Test1234"},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -131,11 +132,11 @@ class TestAuth:
     async def test_register_duplicate(self, client):
         await client.post(
             "/api/auth/register",
-            json={"email": "dup@example.com", "password": "pass123"},
+            json={"email": "dup@example.com", "password": "Test1234"},
         )
         resp = await client.post(
             "/api/auth/register",
-            json={"email": "dup@example.com", "password": "pass123"},
+            json={"email": "dup@example.com", "password": "Test1234"},
         )
         assert resp.status_code == 400
         assert "already registered" in resp.json()["detail"]
@@ -144,11 +145,11 @@ class TestAuth:
     async def test_login(self, client):
         await client.post(
             "/api/auth/register",
-            json={"email": "login@example.com", "password": "pass123"},
+            json={"email": "login@example.com", "password": "Test1234"},
         )
         resp = await client.post(
             "/api/auth/login",
-            data={"username": "login@example.com", "password": "pass123"},
+            data={"username": "login@example.com", "password": "Test1234"},
         )
         assert resp.status_code == 200
         assert "access_token" in resp.json()
@@ -157,11 +158,11 @@ class TestAuth:
     async def test_login_wrong_password(self, client):
         await client.post(
             "/api/auth/register",
-            json={"email": "wrong@example.com", "password": "pass123"},
+            json={"email": "wrong@example.com", "password": "Test1234"},
         )
         resp = await client.post(
             "/api/auth/login",
-            data={"username": "wrong@example.com", "password": "badpassword"},
+            data={"username": "wrong@example.com", "password": "Wrong1234"},
         )
         assert resp.status_code == 401
 
@@ -288,7 +289,7 @@ class TestProjects:
         # User A
         resp_a = await client.post(
             "/api/auth/register",
-            json={"email": "a@test.com", "password": "pass123"},
+            json={"email": "a@test.com", "password": "Test1234"},
         )
         token_a = resp_a.json()["access_token"]
         await client.post(
@@ -300,7 +301,7 @@ class TestProjects:
         # User B
         resp_b = await client.post(
             "/api/auth/register",
-            json={"email": "b@test.com", "password": "pass123"},
+            json={"email": "b@test.com", "password": "Test1234"},
         )
         token_b = resp_b.json()["access_token"]
 
@@ -712,7 +713,7 @@ class TestExports:
 # ---------------------------------------------------------------------------
 
 
-async def register_user(client: AsyncClient, email: str, password: str = "pass1234") -> str:
+async def register_user(client: AsyncClient, email: str, password: str = "Test1234") -> str:
     resp = await client.post("/api/auth/register", json={"email": email, "password": password})
     assert resp.status_code == 200
     return resp.json()["access_token"]

@@ -130,3 +130,17 @@ class Job(Base):
     project = relationship("Project", back_populates="jobs")
     baseline_scenario = relationship("ScenarioRecord", foreign_keys=[baseline_scenario_id])
     intervention_scenario = relationship("ScenarioRecord", foreign_keys=[intervention_scenario_id])
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=True)
+    action = Column(String, nullable=False)
+    resource_type = Column(String, nullable=False)
+    resource_id = Column(Integer, nullable=True)
+    detail = Column(Text, nullable=True)
+    ip_address = Column(String, nullable=True)
+    request_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow)

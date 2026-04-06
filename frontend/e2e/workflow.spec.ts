@@ -457,7 +457,7 @@ test.describe("Honesty and messaging checks", () => {
     // Register fresh user
     const email = `honesty_${Date.now()}@test.com`;
     const resp = await page.request.post(`${API}/api/auth/register`, {
-      data: { email, password: "pass1234" },
+      data: { email, password: "Test1234" },
     });
     expect(resp.ok()).toBeTruthy();
     const { access_token } = await resp.json();
@@ -490,7 +490,7 @@ test.describe("Honesty and messaging checks", () => {
   test("synthetic forcing label visible in workspace", async ({ page }) => {
     const email = `synthetic_${Date.now()}@test.com`;
     const resp = await page.request.post(`${API}/api/auth/register`, {
-      data: { email, password: "pass1234" },
+      data: { email, password: "Test1234" },
     });
     const { access_token } = await resp.json();
     const projResp = await page.request.post(`${API}/api/projects`, {
@@ -524,5 +524,179 @@ test.describe("Honesty and messaging checks", () => {
     expect(species.ok()).toBeTruthy();
     const data = await species.json();
     expect(data).toHaveProperty("tilia_cordata");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RBAC tests — project sharing via browser UI
+// ---------------------------------------------------------------------------
+
+test.describe("RBAC: project sharing", () => {
+  const ownerEmail = `rbac_owner_${Date.now()}@test.com`;
+  const viewerEmail = `rbac_viewer_${Date.now()}@test.com`;
+  const editorEmail = `rbac_editor_${Date.now()}@test.com`;
+  const pw = "Test1234";
+  let ownerToken: string;
+  let viewerToken: string;
+  let editorToken: string;
+  let sharedProjectId: number;
+
+  test("setup: register three users and create a project", async ({ page }) => {
+    // Register owner
+    const o = await page.request.post(`${API}/api/auth/register`, {
+      data: { email: ownerEmail, password: pw },
+    });
+    expect(o.ok()).toBeTruthy();
+    ownerToken = (await o.json()).access_token;
+
+    // Register viewer
+    const v = await page.request.post(`${API}/api/auth/register`, {
+      data: { email: viewerEmail, password: pw },
+    });
+    expect(v.ok()).toBeTruthy();
+    viewerToken = (await v.json()).access_token;
+
+    // Register editor
+    const e = await page.request.post(`${API}/api/auth/register`, {
+      data: { email: editorEmail, password: pw },
+    });
+    expect(e.ok()).toBeTruthy();
+    editorToken = (await e.json()).access_token;
+
+    // Owner creates a project
+    const p = await page.request.post(`${API}/api/projects`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      data: { name: "RBAC Shared Project" },
+    });
+    expect(p.ok()).toBeTruthy();
+    sharedProjectId = (await p.json()).id;
+  });
+
+  test("owner can add viewer via browser UI", async ({ page }) => {
+    // Login as owner
+    await page.goto("/login");
+    await page.fill("input[type='email']", ownerEmail);
+    await page.fill("input[type='password']", pw);
+    await page.click("button[type='submit']");
+    await page.waitForURL("/", { timeout: 10_000 });
+
+    // Navigate to shared project
+    await page.goto(`/projects/${sharedProjectId}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // Check members list shows owner
+    await expect(page.locator("[data-testid='members-list']")).toBeVisible();
+
+    // Add viewer via UI
+    await page.fill("[data-testid='member-email-input']", viewerEmail);
+    await page.selectOption("[data-testid='member-role-select']", "viewer");
+    await page.click("[data-testid='add-member-btn']");
+
+    // Verify viewer appears in list
+    await expect(page.locator(`text=${viewerEmail}`)).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("owner can add editor via browser UI", async ({ page }) => {
+    await page.goto("/login");
+    await page.fill("input[type='email']", ownerEmail);
+    await page.fill("input[type='password']", pw);
+    await page.click("button[type='submit']");
+    await page.waitForURL("/", { timeout: 10_000 });
+
+    await page.goto(`/projects/${sharedProjectId}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    await page.fill("[data-testid='member-email-input']", editorEmail);
+    await page.selectOption("[data-testid='member-role-select']", "editor");
+    await page.click("[data-testid='add-member-btn']");
+
+    await expect(page.locator(`text=${editorEmail}`)).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("viewer sees shared project in dashboard", async ({ page }) => {
+    await page.goto("/login");
+    await page.fill("input[type='email']", viewerEmail);
+    await page.fill("input[type='password']", pw);
+    await page.click("button[type='submit']");
+    await page.waitForURL("/", { timeout: 10_000 });
+
+    // Shared project should appear in project list
+    await expect(page.locator("text=RBAC Shared Project")).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("viewer can open shared project but cannot see add-member form", async ({ page }) => {
+    await page.goto("/login");
+    await page.fill("input[type='email']", viewerEmail);
+    await page.fill("input[type='password']", pw);
+    await page.click("button[type='submit']");
+    await page.waitForURL("/", { timeout: 10_000 });
+
+    await page.goto(`/projects/${sharedProjectId}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // Members list visible
+    await expect(page.locator("[data-testid='members-list']")).toBeVisible();
+
+    // Add member form should NOT be visible (viewer is not owner)
+    await expect(page.locator("[data-testid='add-member-form']")).not.toBeVisible();
+  });
+
+  test("viewer cannot create scenario (API enforced)", async ({ page }) => {
+    const resp = await page.request.post(
+      `${API}/api/projects/${sharedProjectId}/scenarios`,
+      {
+        headers: { Authorization: `Bearer ${viewerToken}` },
+        data: {
+          scenario_json: {
+            name: "Viewer Attempt",
+            scenario_type: "baseline",
+            domain: { bbox: { west: 356000, south: 5645000, east: 356500, north: 5645500 }, resolution_m: 10, epsg: 25832, nz: 40, dz: 2 },
+            simulation: { forcing: "typical_hot_day", simulation_hours: 6, output_interval_s: 1800 },
+            trees: [], surface_changes: [], green_roofs: [],
+          },
+        },
+      }
+    );
+    expect(resp.status()).toBe(403);
+  });
+
+  test("editor can create scenario (API enforced)", async ({ page }) => {
+    const resp = await page.request.post(
+      `${API}/api/projects/${sharedProjectId}/scenarios`,
+      {
+        headers: { Authorization: `Bearer ${editorToken}` },
+        data: {
+          scenario_json: {
+            name: "Editor Scenario",
+            scenario_type: "baseline",
+            domain: { bbox: { west: 356000, south: 5645000, east: 356500, north: 5645500 }, resolution_m: 10, epsg: 25832, nz: 40, dz: 2 },
+            simulation: { forcing: "typical_hot_day", simulation_hours: 6, output_interval_s: 1800 },
+            trees: [], surface_changes: [], green_roofs: [],
+          },
+        },
+      }
+    );
+    expect(resp.status()).toBe(201);
+  });
+
+  test("owner can remove viewer via browser UI", async ({ page }) => {
+    await page.goto("/login");
+    await page.fill("input[type='email']", ownerEmail);
+    await page.fill("input[type='password']", pw);
+    await page.click("button[type='submit']");
+    await page.waitForURL("/", { timeout: 10_000 });
+
+    await page.goto(`/projects/${sharedProjectId}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // Wait for viewer to appear in the list
+    await expect(page.locator(`text=${viewerEmail}`)).toBeVisible({ timeout: 5_000 });
+
+    // Find the remove button for the viewer member row and click it
+    const viewerRow = page.locator(`[data-testid='members-list'] >> text=${viewerEmail}`).locator("..");
+    await viewerRow.locator("button").click();
+
+    // Viewer should disappear
+    await expect(page.locator(`text=${viewerEmail}`)).not.toBeVisible({ timeout: 5_000 });
   });
 });

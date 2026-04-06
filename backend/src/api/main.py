@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,9 @@ from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresh
 from ..monitoring.health import get_health
 from ..monitoring.metrics import collect_metrics
 from ..monitoring.logging_config import setup_logging, generate_request_id, request_id_var
+from ..security.password import validate_password, PasswordValidationError
+from ..security.audit import log_action
+from ..security.rate_limit import auth_limiter
 from ..workers.executor import run_job_background, get_job_progress, ensure_embedded_worker
 from .auth import create_access_token, get_password_hash, verify_password
 from .deps import get_current_user
@@ -74,7 +78,15 @@ app.add_middleware(RequestIDMiddleware)
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    import logging as _logging
     setup_logging()
+    _logger = _logging.getLogger(__name__)
+
+    # JWT secret validation
+    from .auth import SECRET_KEY
+    if SECRET_KEY == "palm4u-dev-secret-change-in-production" and not os.getenv("PALM4U_DEV_MODE", ""):
+        _logger.warning("JWT_SECRET_KEY is using the default dev secret. Set JWT_SECRET_KEY env var for production.")
+
     await init_db()
     ensure_embedded_worker()
 
@@ -191,7 +203,16 @@ async def metrics_endpoint(db: AsyncSession = Depends(get_db)) -> Response:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/register", response_model=TokenResponse)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+async def register(request: StarletteRequest, body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    if not auth_limiter.is_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
+    try:
+        validate_password(body.password)
+    except PasswordValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     existing = await db.execute(select(User).where(User.email == body.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -199,19 +220,28 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
     user = User(email=body.email, hashed_password=get_password_hash(body.password))
     db.add(user)
     await db.flush()
+    await log_action(db, user.id, "register", "user", user.id, ip_address=client_ip)
     token = create_access_token({"sub": str(user.id)})
     return TokenResponse(access_token=token)
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(
+    request: StarletteRequest,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    if not auth_limiter.is_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
     result = await db.execute(select(User).where(User.email == form.username))
     user = result.scalar_one_or_none()
     if not user or not verify_password(form.password, user.hashed_password):
+        await log_action(db, None, "login_failed", "auth", detail=f"email={form.username}", ip_address=client_ip)
+        await db.commit()  # Persist audit log before raising
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    await log_action(db, user.id, "login", "user", user.id, ip_address=client_ip)
     token = create_access_token({"sub": str(user.id)})
     return TokenResponse(access_token=token)
 
