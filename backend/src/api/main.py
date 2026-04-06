@@ -33,6 +33,9 @@ from ..db.models import Job, JobStatus, JobType, Project, ProjectMember, Project
 from ..models.scenario import Scenario, ComparisonRequest
 from ..validation.engine import validate_scenario
 from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresholds
+from ..monitoring.health import get_health
+from ..monitoring.metrics import collect_metrics
+from ..monitoring.logging_config import setup_logging, generate_request_id, request_id_var
 from ..workers.executor import run_job_background, get_job_progress, ensure_embedded_worker
 from .auth import create_access_token, get_password_hash, verify_password
 from .deps import get_current_user
@@ -52,8 +55,26 @@ app.add_middleware(
 )
 
 
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next: RequestResponseEndpoint) -> StarletteResponse:
+        rid = request.headers.get("X-Request-ID") or generate_request_id()
+        request_id_var.set(rid)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = rid
+        return response
+
+
+app.add_middleware(RequestIDMiddleware)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
+    setup_logging()
     await init_db()
     ensure_embedded_worker()
 
@@ -147,6 +168,22 @@ class BuildingsRequest(BaseModel):
 class DEMRequest(BaseModel):
     bbox: BBoxInput
     epsg: int = 25832
+
+
+# ---------------------------------------------------------------------------
+# Health & Metrics (unauthenticated)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/health")
+async def health_endpoint(db: AsyncSession = Depends(get_db)) -> dict:
+    return await get_health(db)
+
+
+@app.get("/api/metrics")
+async def metrics_endpoint(db: AsyncSession = Depends(get_db)) -> Response:
+    body = await collect_metrics(db)
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 # ---------------------------------------------------------------------------
