@@ -68,6 +68,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Total-Count", "X-Request-ID"],
 )
 
 
@@ -310,10 +311,24 @@ async def create_project(
 
 @app.get("/api/projects", response_model=list[ProjectResponse])
 async def list_projects(
+    response: Response,
+    limit: int = 50,
+    offset: int = 0,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ProjectResponse]:
-    # Show projects where user is owner OR has a membership
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    # Total count of accessible projects (distinct, since outerjoin can dup)
+    count_stmt = (
+        select(func.count(func.distinct(Project.id)))
+        .outerjoin(ProjectMember, ProjectMember.project_id == Project.id)
+        .where((Project.user_id == user.id) | (ProjectMember.user_id == user.id))
+    )
+    total = (await db.execute(count_stmt)).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+
     stmt = (
         select(Project, func.count(ScenarioRecord.id).label("scenario_count"))
         .outerjoin(ScenarioRecord, ScenarioRecord.project_id == Project.id)
@@ -322,6 +337,9 @@ async def list_projects(
             (Project.user_id == user.id) | (ProjectMember.user_id == user.id)
         )
         .group_by(Project.id)
+        .order_by(Project.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     rows = (await db.execute(stmt)).all()
     return [
@@ -772,15 +790,33 @@ async def compare_job(
 
 @app.get("/api/jobs", response_model=list[dict[str, Any]])
 async def list_jobs(
+    response: Response,
+    limit: int = 50,
+    offset: int = 0,
+    status_filter: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    # Show jobs from projects where user is owner or member
-    result = await db.execute(
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    base = (
         select(Job)
         .outerjoin(ProjectMember, (ProjectMember.project_id == Job.project_id) & (ProjectMember.user_id == user.id))
         .where((Job.user_id == user.id) | (ProjectMember.user_id == user.id))
-        .order_by(Job.created_at.desc())
+    )
+    if status_filter:
+        try:
+            base = base.where(Job.status == JobStatus(status_filter))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"invalid status: {status_filter}")
+
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+
+    result = await db.execute(
+        base.order_by(Job.created_at.desc()).offset(offset).limit(limit)
     )
     jobs = result.scalars().all()
     return [
@@ -1430,16 +1466,23 @@ async def admin_queue_stats(
 
 @app.get("/api/admin/audit-log")
 async def admin_audit_log(
+    response: Response,
     limit: int = 50,
     offset: int = 0,
     action: str | None = None,
     user: User = Depends(_require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    stmt = select(AuditLog).order_by(AuditLog.created_at.desc())
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    base = select(AuditLog)
     if action:
-        stmt = stmt.where(AuditLog.action == action)
-    stmt = stmt.offset(offset).limit(min(limit, 200))
+        base = base.where(AuditLog.action == action)
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+
+    stmt = base.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit)
 
     result = await db.execute(stmt)
     logs = result.scalars().all()
