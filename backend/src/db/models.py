@@ -155,3 +155,21 @@ class AuditLog(Base):
     ip_address = Column(String, nullable=True)
     request_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=utcnow)
+
+
+class ForcingFile(Base):
+    __tablename__ = "forcing_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    filename = Column(String, nullable=False)
+    original_name = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False)
+    description = Column(Text, nullable=True)
+    validated = Column(Boolean, default=False, nullable=False)
+    validation_errors = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    project = relationship("Project")
+    user = relationship("User")

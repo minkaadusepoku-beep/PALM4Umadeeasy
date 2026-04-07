@@ -15,7 +15,9 @@ import rasterio
 from fastapi import (
     Depends,
     FastAPI,
+    File,
     HTTPException,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -30,13 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import CATALOGUE_DIR, PROJECT_ROOT
 from ..db.database import get_db, init_db
-from ..db.models import AuditLog, Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
+from ..db.models import AuditLog, ForcingFile, Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
 from ..models.scenario import Scenario, ComparisonRequest
 from ..validation.engine import validate_scenario
 from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresholds
 from ..monitoring.health import get_health
 from ..monitoring.metrics import collect_metrics
 from ..monitoring.logging_config import setup_logging, generate_request_id, request_id_var
+from ..science.forcing_validator import validate_forcing_file
 from ..science.wind_comfort import generate_stub_wind_comfort, get_category_legend
 from ..security.password import validate_password, PasswordValidationError
 from ..security.audit import log_action
@@ -1228,6 +1231,101 @@ async def fetch_dem(body: DEMRequest) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Forcing file routes (/api/projects/{project_id}/forcing)
+# ---------------------------------------------------------------------------
+
+FORCING_UPLOAD_DIR = Path(os.getenv("PALM4U_FORCING_DIR", "./forcing_uploads"))
+
+
+@app.post("/api/projects/{project_id}/forcing", status_code=201)
+async def upload_forcing(
+    project_id: int,
+    file: UploadFile = File(...),
+    description: str = "",
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _verify_project_access(project_id, user, db, min_role="editor")
+
+    FORCING_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = f"proj{project_id}_{file.filename}"
+    dest = FORCING_UPLOAD_DIR / safe_name
+
+    content = await file.read()
+    dest.write_bytes(content)
+
+    errors = validate_forcing_file(dest, file.filename or "unknown")
+
+    record = ForcingFile(
+        project_id=project_id,
+        user_id=user.id,
+        filename=safe_name,
+        original_name=file.filename or "unknown",
+        file_size=len(content),
+        description=description,
+        validated=len(errors) == 0,
+        validation_errors="; ".join(errors) if errors else None,
+    )
+    db.add(record)
+    await db.flush()
+
+    return {
+        "id": record.id,
+        "filename": record.original_name,
+        "file_size": record.file_size,
+        "validated": record.validated,
+        "validation_errors": errors,
+    }
+
+
+@app.get("/api/projects/{project_id}/forcing")
+async def list_forcing(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    await _verify_project_access(project_id, user, db, min_role="viewer")
+    result = await db.execute(
+        select(ForcingFile).where(ForcingFile.project_id == project_id).order_by(ForcingFile.created_at.desc())
+    )
+    files = result.scalars().all()
+    return [
+        {
+            "id": f.id,
+            "filename": f.original_name,
+            "file_size": f.file_size,
+            "validated": f.validated,
+            "validation_errors": f.validation_errors,
+            "description": f.description,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f in files
+    ]
+
+
+@app.delete("/api/projects/{project_id}/forcing/{forcing_id}", status_code=204)
+async def delete_forcing(
+    project_id: int,
+    forcing_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _verify_project_access(project_id, user, db, min_role="editor")
+    result = await db.execute(
+        select(ForcingFile).where(ForcingFile.id == forcing_id, ForcingFile.project_id == project_id)
+    )
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Forcing file not found")
+
+    # Delete file from disk
+    file_path = FORCING_UPLOAD_DIR / record.filename
+    if file_path.exists():
+        file_path.unlink()
+
+    await db.delete(record)
+
+
 # ---------------------------------------------------------------------------
 # Admin routes (/api/admin) — requires is_admin flag
 # ---------------------------------------------------------------------------

@@ -43,3 +43,6 @@ coverage/
 
 # Build outputs
 *.tgz
+
+# User uploads
+backend/forcing_uploads/
