@@ -40,6 +40,11 @@ from ..monitoring.health import get_health
 from ..monitoring.metrics import collect_metrics
 from ..monitoring.logging_config import setup_logging, generate_request_id, request_id_var
 from ..science.forcing_validator import validate_forcing_file
+from ..science.facade_greening_advisory import (
+    FacadeGreeningInput,
+    full_advisory as facade_full_advisory,
+    list_supported_species as facade_list_species,
+)
 from ..science.wind_comfort import generate_stub_wind_comfort, get_category_legend
 from ..security.password import validate_password, PasswordValidationError
 from ..security.audit import log_action
@@ -1324,6 +1329,55 @@ async def delete_forcing(
         file_path.unlink()
 
     await db.delete(record)
+
+
+# ---------------------------------------------------------------------------
+# Facade greening ADVISORY routes (NON-PALM, NON-COUPLED)
+#
+# IMPORTANT: All responses here carry result_kind="advisory_non_palm" and
+# coupled_with_palm=False. They MUST NOT be merged with PALM/PALM-4U
+# results in any client, report, or downstream aggregation.
+# ---------------------------------------------------------------------------
+
+
+class FacadeGreeningRequest(BaseModel):
+    facade_area_m2: float
+    species: str = "hedera_helix"
+    coverage_fraction: float = 1.0
+    climate_zone: str = "temperate"
+
+
+@app.post("/api/advisory/facade-greening")
+async def advisory_facade_greening(
+    body: FacadeGreeningRequest,
+    user: User = Depends(get_current_user),
+) -> dict:
+    """First-order, literature-based facade greening advisory.
+
+    NOT a PALM simulation. Response carries provenance flags that
+    downstream consumers must preserve.
+    """
+    try:
+        inp = FacadeGreeningInput(
+            facade_area_m2=body.facade_area_m2,
+            species=body.species,  # type: ignore[arg-type]
+            coverage_fraction=body.coverage_fraction,
+            climate_zone=body.climate_zone,
+        )
+        return facade_full_advisory(inp)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/advisory/facade-greening/species")
+async def advisory_facade_greening_species(
+    user: User = Depends(get_current_user),
+) -> dict:
+    return {
+        "result_kind": "advisory_non_palm",
+        "coupled_with_palm": False,
+        "species": facade_list_species(),
+    }
 
 
 # ---------------------------------------------------------------------------
