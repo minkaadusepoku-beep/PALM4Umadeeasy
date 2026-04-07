@@ -17,6 +17,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -1499,6 +1500,130 @@ async def admin_audit_log(
             "created_at": log.created_at.isoformat() if log.created_at else None,
         }
         for log in logs
+    ]
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    response: Response,
+    limit: int = 50,
+    offset: int = 0,
+    user: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    total = (await db.execute(select(func.count(User.id)))).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+    rows = (
+        await db.execute(
+            select(User).order_by(User.id.asc()).offset(offset).limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "is_admin": u.is_admin,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in rows
+    ]
+
+
+class AdminUserPatch(BaseModel):
+    is_admin: bool | None = None
+    is_active: bool | None = None
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_patch_user(
+    user_id: int,
+    body: AdminUserPatch,
+    request: Request,
+    actor: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    target = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == actor.id and body.is_active is False:
+        raise HTTPException(status_code=400, detail="Admins cannot deactivate themselves")
+    if target.id == actor.id and body.is_admin is False:
+        raise HTTPException(status_code=400, detail="Admins cannot demote themselves")
+
+    changes = {}
+    if body.is_admin is not None and body.is_admin != target.is_admin:
+        target.is_admin = body.is_admin
+        changes["is_admin"] = body.is_admin
+    if body.is_active is not None and body.is_active != target.is_active:
+        target.is_active = body.is_active
+        changes["is_active"] = body.is_active
+
+    if changes:
+        await log_action(
+            db,
+            user_id=actor.id,
+            action="admin_user_patch",
+            resource_type="user",
+            resource_id=str(target.id),
+            detail=str(changes),
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
+
+    return {
+        "id": target.id,
+        "email": target.email,
+        "is_admin": target.is_admin,
+        "is_active": target.is_active,
+    }
+
+
+@app.get("/api/admin/jobs")
+async def admin_list_jobs(
+    response: Response,
+    limit: int = 50,
+    offset: int = 0,
+    status_filter: str | None = None,
+    actor: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """System-wide job view (all users, all projects)."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    base = select(Job)
+    if status_filter:
+        try:
+            base = base.where(Job.status == JobStatus(status_filter))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"invalid status: {status_filter}")
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+    rows = (
+        await db.execute(
+            base.order_by(Job.created_at.desc()).offset(offset).limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "job_id": j.id,
+            "user_id": j.user_id,
+            "project_id": j.project_id,
+            "job_type": j.job_type.value,
+            "status": j.status.value,
+            "worker_id": j.worker_id,
+            "priority": j.priority,
+            "retry_count": j.retry_count,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+            "error_message": j.error_message,
+        }
+        for j in rows
     ]
 
 
