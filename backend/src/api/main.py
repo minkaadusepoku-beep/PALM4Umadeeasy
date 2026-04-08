@@ -58,7 +58,28 @@ from .deps import get_current_user
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="PALM4Umadeeasy", version="0.1.0")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import logging as _logging
+    setup_logging()
+    _logger = _logging.getLogger(__name__)
+
+    from .auth import SECRET_KEY
+    if SECRET_KEY == "palm4u-dev-secret-change-in-production" and not os.getenv("PALM4U_DEV_MODE", ""):
+        _logger.warning(
+            "JWT_SECRET_KEY is using the default dev secret. "
+            "Set JWT_SECRET_KEY env var for production."
+        )
+
+    await init_db()
+    ensure_embedded_worker()
+    yield
+
+
+app = FastAPI(title="PALM4Umadeeasy", version="0.1.0", lifespan=lifespan)
 
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -88,21 +109,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestIDMiddleware)
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    import logging as _logging
-    setup_logging()
-    _logger = _logging.getLogger(__name__)
-
-    # JWT secret validation
-    from .auth import SECRET_KEY
-    if SECRET_KEY == "palm4u-dev-secret-change-in-production" and not os.getenv("PALM4U_DEV_MODE", ""):
-        _logger.warning("JWT_SECRET_KEY is using the default dev secret. Set JWT_SECRET_KEY env var for production.")
-
-    await init_db()
-    ensure_embedded_worker()
 
 
 # ---------------------------------------------------------------------------
