@@ -326,6 +326,29 @@ interface HealthResponse {
   components: Record<string, { status: string; [key: string]: unknown }>;
 }
 
+interface AdminUser {
+  id: number;
+  email: string;
+  is_admin: boolean;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+interface AdminJob {
+  job_id: number;
+  user_id: number;
+  project_id: number;
+  job_type: string;
+  status: string;
+  worker_id: string | null;
+  priority: number;
+  retry_count: number;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
 export const admin = {
   queueStats() {
     return apiFetch<QueueStats>('/admin/queue-stats');
@@ -339,5 +362,126 @@ export const admin = {
 
   health() {
     return apiFetch<HealthResponse>('/health');
+  },
+
+  listUsers(limit = 50, offset = 0) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return apiFetch<AdminUser[]>(`/admin/users?${params}`);
+  },
+
+  patchUser(id: number, patch: { is_admin?: boolean; is_active?: boolean }) {
+    return apiFetch<AdminUser>(`/admin/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  },
+
+  listJobs(limit = 50, offset = 0, statusFilter?: string) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (statusFilter) params.set('status_filter', statusFilter);
+    return apiFetch<AdminJob[]>(`/admin/jobs?${params}`);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Forcing files
+// ---------------------------------------------------------------------------
+
+export interface ForcingFile {
+  id: number;
+  filename: string;
+  file_size: number;
+  validated: boolean;
+  validation_errors: string[] | string | null;
+  description?: string;
+  created_at?: string | null;
+}
+
+export const forcing = {
+  list(projectId: number) {
+    return apiFetch<ForcingFile[]>(`/projects/${projectId}/forcing`);
+  },
+
+  async upload(projectId: number, file: File, description = '') {
+    const form = new FormData();
+    form.append('file', file);
+    if (description) form.append('description', description);
+    const headers: Record<string, string> = {};
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('palm4u_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    }
+    const res = await fetch(`${API_BASE}/projects/${projectId}/forcing`, {
+      method: 'POST',
+      headers,
+      body: form,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return res.json() as Promise<ForcingFile>;
+  },
+
+  remove(projectId: number, forcingId: number) {
+    return apiFetch<void>(`/projects/${projectId}/forcing/${forcingId}`, {
+      method: 'DELETE',
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Facade greening ADVISORY (NON-PALM, NON-COUPLED)
+//
+// IMPORTANT: every response from this namespace carries
+//   result_kind: "advisory_non_palm"
+//   coupled_with_palm: false
+// The UI MUST display these flags prominently and MUST NOT merge or
+// co-display these results with PALM-coupled outputs.
+// ---------------------------------------------------------------------------
+
+export interface AdvisoryProvenance {
+  result_kind: 'advisory_non_palm';
+  coupled_with_palm: false;
+  method: string;
+  uncertainty: string;
+  warning: string;
+}
+
+export interface FacadeGreeningAdvisory extends AdvisoryProvenance {
+  pollutant_uptake: AdvisoryProvenance & {
+    inputs: Record<string, unknown>;
+    leaf_area_m2: { low: number; central: number; high: number };
+    pollutants: Record<
+      string,
+      { low_kg_per_year: number; central_kg_per_year: number; high_kg_per_year: number }
+    >;
+  };
+  cooling_effect: AdvisoryProvenance & {
+    delta_t_celsius: { low: number; high: number };
+    scope: string;
+  };
+  energy_savings: AdvisoryProvenance & {
+    summer_cooling_load_reduction_fraction: { low: number; high: number };
+  };
+  disclaimer: string;
+}
+
+export const facadeGreeningAdvisory = {
+  estimate(input: {
+    facade_area_m2: number;
+    species: string;
+    coverage_fraction?: number;
+    climate_zone?: string;
+  }) {
+    return apiFetch<FacadeGreeningAdvisory>('/advisory/facade-greening', {
+      method: 'POST',
+      body: JSON.stringify({ coverage_fraction: 1.0, climate_zone: 'temperate', ...input }),
+    });
+  },
+
+  species() {
+    return apiFetch<{
+      result_kind: 'advisory_non_palm';
+      coupled_with_palm: false;
+      species: { id: string; lai_low: number; lai_central: number; lai_high: number }[];
+    }>('/advisory/facade-greening/species');
   },
 };

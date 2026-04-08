@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { admin, auth } from "@/lib/api";
+import { admin } from "@/lib/api";
 
 interface QueueStats {
   jobs: Record<string, number>;
@@ -27,6 +27,27 @@ interface AuditEntry {
   created_at: string | null;
 }
 
+interface AdminUserRow {
+  id: number;
+  email: string;
+  is_admin: boolean;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+interface AdminJobRow {
+  job_id: number;
+  user_id: number;
+  project_id: number;
+  job_type: string;
+  status: string;
+  worker_id: string | null;
+  priority: number;
+  retry_count: number;
+  created_at: string | null;
+  error_message: string | null;
+}
+
 const STATUS_COLORS: Record<string, string> = {
   healthy: "text-green-600 bg-green-50",
   degraded: "text-amber-600 bg-amber-50",
@@ -38,20 +59,48 @@ export default function AdminDashboard() {
   const [queue, setQueue] = useState<QueueStats | null>(null);
   const [health, setHealth] = useState<HealthData | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [users, setUsers] = useState<AdminUserRow[]>([]);
+  const [systemJobs, setSystemJobs] = useState<AdminJobRow[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+
+  async function reloadUsers() {
+    setUsers(await admin.listUsers(50, 0));
+  }
+
+  async function toggleActive(u: AdminUserRow) {
+    try {
+      await admin.patchUser(u.id, { is_active: !u.is_active });
+      await reloadUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update user");
+    }
+  }
+
+  async function toggleAdmin(u: AdminUserRow) {
+    try {
+      await admin.patchUser(u.id, { is_admin: !u.is_admin });
+      await reloadUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update user");
+    }
+  }
 
   useEffect(() => {
     async function load() {
       try {
-        const [q, h, a] = await Promise.all([
+        const [q, h, a, u, j] = await Promise.all([
           admin.queueStats(),
           admin.health(),
           admin.auditLog(30),
+          admin.listUsers(50, 0),
+          admin.listJobs(50, 0),
         ]);
         setQueue(q);
         setHealth(h);
         setAudit(a);
+        setUsers(u);
+        setSystemJobs(j);
       } catch (err: unknown) {
         if (err instanceof Error && err.message.includes("403")) {
           setError("Admin access required");
@@ -139,6 +188,103 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* Users */}
+      <section className="bg-white rounded-lg border p-4" data-testid="users-panel">
+        <h2 className="text-lg font-semibold mb-3">Users ({users.length})</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-left text-slate-500">
+                <th className="py-2 pr-3">ID</th>
+                <th className="py-2 pr-3">Email</th>
+                <th className="py-2 pr-3">Admin</th>
+                <th className="py-2 pr-3">Active</th>
+                <th className="py-2 pr-3">Created</th>
+                <th className="py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id} className="border-b hover:bg-slate-50">
+                  <td className="py-2 pr-3 text-xs">{u.id}</td>
+                  <td className="py-2 pr-3">{u.email}</td>
+                  <td className="py-2 pr-3">{u.is_admin ? "yes" : "no"}</td>
+                  <td className="py-2 pr-3">
+                    <span className={u.is_active ? "text-green-600" : "text-red-600"}>
+                      {u.is_active ? "active" : "deactivated"}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-xs text-slate-400">
+                    {u.created_at ? new Date(u.created_at).toLocaleDateString() : "-"}
+                  </td>
+                  <td className="py-2 space-x-2">
+                    <button
+                      onClick={() => toggleActive(u)}
+                      className="text-xs px-2 py-1 border rounded hover:bg-slate-100"
+                    >
+                      {u.is_active ? "Deactivate" : "Activate"}
+                    </button>
+                    <button
+                      onClick={() => toggleAdmin(u)}
+                      className="text-xs px-2 py-1 border rounded hover:bg-slate-100"
+                    >
+                      {u.is_admin ? "Demote" : "Promote"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {users.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="py-4 text-center text-slate-400">No users</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* System-wide Jobs */}
+      <section className="bg-white rounded-lg border p-4" data-testid="system-jobs-panel">
+        <h2 className="text-lg font-semibold mb-3">System-wide Jobs ({systemJobs.length})</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-left text-slate-500">
+                <th className="py-2 pr-3">Job</th>
+                <th className="py-2 pr-3">User</th>
+                <th className="py-2 pr-3">Project</th>
+                <th className="py-2 pr-3">Type</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Worker</th>
+                <th className="py-2 pr-3">Retries</th>
+                <th className="py-2">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {systemJobs.map((j) => (
+                <tr key={j.job_id} className="border-b hover:bg-slate-50">
+                  <td className="py-2 pr-3 text-xs">#{j.job_id}</td>
+                  <td className="py-2 pr-3 text-xs">{j.user_id}</td>
+                  <td className="py-2 pr-3 text-xs">{j.project_id}</td>
+                  <td className="py-2 pr-3 text-xs">{j.job_type}</td>
+                  <td className="py-2 pr-3 text-xs font-medium">{j.status}</td>
+                  <td className="py-2 pr-3 text-xs">{j.worker_id || "-"}</td>
+                  <td className="py-2 pr-3 text-xs">{j.retry_count}</td>
+                  <td className="py-2 text-xs text-slate-400">
+                    {j.created_at ? new Date(j.created_at).toLocaleString() : "-"}
+                  </td>
+                </tr>
+              ))}
+              {systemJobs.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="py-4 text-center text-slate-400">No jobs</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       {/* Audit Log */}
