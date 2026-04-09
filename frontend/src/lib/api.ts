@@ -7,6 +7,7 @@ import type {
   Project,
   ProjectMember,
   ProjectRole,
+  ResolvedBuildingsResponse,
   Scenario,
   ScenarioRecord,
   SpeciesInfo,
@@ -277,6 +278,56 @@ export const data = {
       method: 'POST',
       body: JSON.stringify({ bbox, epsg }),
     });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Building geometry edits (ADR-004)
+// ---------------------------------------------------------------------------
+
+export const buildingEdits = {
+  getResolved(projectId: number, scenarioId: number) {
+    return apiFetch<ResolvedBuildingsResponse>(
+      `/projects/${projectId}/scenarios/${scenarioId}/buildings`
+    );
+  },
+
+  appendEdit(
+    projectId: number,
+    scenarioId: number,
+    edit: {
+      op: string;
+      id?: string;
+      geometry?: unknown;
+      height_m?: number;
+      roof_type?: string;
+      wall_material_id?: string;
+      target_building_id?: string;
+      set?: Record<string, unknown>;
+    }
+  ) {
+    return apiFetch<{
+      edit_id: string;
+      warnings: { edit_id: string; code: string; message: string }[];
+      resolved: ResolvedBuildingsResponse;
+    }>(`/projects/${projectId}/scenarios/${scenarioId}/buildings/edits`, {
+      method: 'POST',
+      body: JSON.stringify(edit),
+    });
+  },
+
+  deleteEdit(projectId: number, scenarioId: number, editId: string) {
+    return apiFetch<{ deleted: string; resolved: ResolvedBuildingsResponse }>(
+      `/projects/${projectId}/scenarios/${scenarioId}/buildings/edits/${editId}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  reorder(projectId: number, scenarioId: number, orderedIds: string[]) {
+    return apiFetch<{ resolved: ResolvedBuildingsResponse }>(
+      `/projects/${projectId}/scenarios/${scenarioId}/buildings/edits:reorder`,
+      { method: 'POST', body: JSON.stringify({ ordered_ids: orderedIds }) }
+    );
   },
 };
 

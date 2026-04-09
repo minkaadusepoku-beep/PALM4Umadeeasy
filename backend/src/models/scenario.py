@@ -62,12 +62,25 @@ class DomainConfig(BaseModel):
     dz: float = Field(2.0, ge=0.5, le=10.0)
 
     @property
+    def _is_geographic(self) -> bool:
+        """True when the CRS uses degrees (e.g. EPSG 4326)."""
+        return self.epsg == 4326
+
+    @property
     def nx(self) -> int:
-        return max(1, round((self.bbox.east - self.bbox.west) / self.resolution_m))
+        dx = self.bbox.east - self.bbox.west
+        if self._is_geographic:
+            import math
+            mid_lat = (self.bbox.south + self.bbox.north) / 2.0
+            dx = dx * 111_320.0 * math.cos(math.radians(mid_lat))
+        return max(1, round(dx / self.resolution_m))
 
     @property
     def ny(self) -> int:
-        return max(1, round((self.bbox.north - self.bbox.south) / self.resolution_m))
+        dy = self.bbox.north - self.bbox.south
+        if self._is_geographic:
+            dy = dy * 111_320.0
+        return max(1, round(dy / self.resolution_m))
 
 
 # --- Data sources ---

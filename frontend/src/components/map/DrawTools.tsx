@@ -4,13 +4,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BoundingBox } from '@/lib/types';
 import { useMap } from './MapContainer';
 
-type DrawMode = 'none' | 'bbox' | 'tree' | 'surface';
+type DrawMode = 'none' | 'bbox' | 'tree' | 'surface' | 'building';
 
 interface DrawToolsProps {
   mode: DrawMode;
   onBboxComplete: (bbox: BoundingBox) => void;
   onTreePlace: (x: number, y: number) => void;
   onSurfaceComplete: (vertices: [number, number][]) => void;
+  onBuildingComplete?: (polygon: number[][]) => void;
 }
 
 const HELP_TEXT: Record<DrawMode, string> = {
@@ -18,6 +19,7 @@ const HELP_TEXT: Record<DrawMode, string> = {
   bbox: 'Click two corners to define study area',
   tree: 'Click to place tree',
   surface: 'Click to draw surface polygon, double-click to finish',
+  building: 'Click to draw building footprint, double-click to finish',
 };
 
 export default function DrawTools({
@@ -25,7 +27,9 @@ export default function DrawTools({
   onBboxComplete,
   onTreePlace,
   onSurfaceComplete,
+  onBuildingComplete,
 }: DrawToolsProps) {
+  const [buildingVertices, setBuildingVertices] = useState<[number, number][]>([]);
   const { map } = useMap();
   const [bboxCorner, setBboxCorner] = useState<[number, number] | null>(null);
   const [surfaceVertices, setSurfaceVertices] = useState<[number, number][]>([]);
@@ -37,12 +41,53 @@ export default function DrawTools({
     markersRef.current = [];
   }, []);
 
+  // Remove building preview layers
+  const clearBuildingPreview = useCallback(() => {
+    if (!map) return;
+    if (map.getLayer('building-preview-fill')) map.removeLayer('building-preview-fill');
+    if (map.getLayer('building-preview-outline')) map.removeLayer('building-preview-outline');
+    if (map.getSource('building-preview')) map.removeSource('building-preview');
+  }, [map]);
+
+  // Draw building polygon preview (orange)
+  const drawBuildingPreview = useCallback(
+    (verts: [number, number][]) => {
+      if (!map || verts.length < 2) return;
+      clearBuildingPreview();
+
+      const closed = [...verts, verts[0]];
+      map.addSource('building-preview', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [closed] },
+        },
+      });
+      map.addLayer({
+        id: 'building-preview-fill',
+        type: 'fill',
+        source: 'building-preview',
+        paint: { 'fill-color': '#f59e0b', 'fill-opacity': 0.3 },
+      });
+      map.addLayer({
+        id: 'building-preview-outline',
+        type: 'line',
+        source: 'building-preview',
+        paint: { 'line-color': '#f59e0b', 'line-width': 2 },
+      });
+    },
+    [map, clearBuildingPreview]
+  );
+
   // Reset state when mode changes
   useEffect(() => {
     setBboxCorner(null);
     setSurfaceVertices([]);
+    setBuildingVertices([]);
     clearMarkers();
-  }, [mode, clearMarkers]);
+    clearBuildingPreview();
+  }, [mode, clearMarkers, clearBuildingPreview]);
 
   // Remove the existing source/layer for bbox preview
   const clearBboxPreview = useCallback(() => {
@@ -166,6 +211,14 @@ export default function DrawTools({
           return next;
         });
       }
+
+      if (mode === 'building') {
+        setBuildingVertices((prev) => {
+          const next = [...prev, [lng, lat] as [number, number]];
+          if (next.length >= 2) drawBuildingPreview(next);
+          return next;
+        });
+      }
     };
 
     const handleDblClick = (e: maplibregl.MapMouseEvent) => {
@@ -174,6 +227,13 @@ export default function DrawTools({
         onSurfaceComplete(surfaceVertices);
         setSurfaceVertices([]);
         clearSurfacePreview();
+      }
+      if (mode === 'building' && buildingVertices.length >= 3 && onBuildingComplete) {
+        e.preventDefault();
+        const closed = [...buildingVertices, buildingVertices[0]];
+        onBuildingComplete(closed);
+        setBuildingVertices([]);
+        clearBuildingPreview();
       }
     };
 
@@ -189,12 +249,16 @@ export default function DrawTools({
     mode,
     bboxCorner,
     surfaceVertices,
+    buildingVertices,
     onBboxComplete,
     onTreePlace,
     onSurfaceComplete,
+    onBuildingComplete,
     drawBboxPreview,
     drawSurfacePreview,
     clearSurfacePreview,
+    drawBuildingPreview,
+    clearBuildingPreview,
   ]);
 
   // Show bbox preview on mouse move

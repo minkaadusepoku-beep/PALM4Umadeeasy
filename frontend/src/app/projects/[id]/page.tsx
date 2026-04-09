@@ -11,6 +11,7 @@ import {
   members as membersApi,
   forcing as forcingApi,
   facadeGreeningAdvisory,
+  buildingEdits as buildingEditsApi,
 } from "@/lib/api";
 import type { ForcingFile, FacadeGreeningAdvisory } from "@/lib/api";
 import type {
@@ -29,9 +30,12 @@ import type {
   SurfaceInfo,
   DataQualityTier,
   BoundingBox,
+  ResolvedBuilding,
+  RoofType,
 } from "@/lib/types";
 import MapContainer from "@/components/map/MapContainer";
 import DrawTools from "@/components/map/DrawTools";
+import BuildingEditor from "@/components/map/BuildingEditor";
 
 const FORCING_OPTIONS: { value: ForcingArchetype; label: string }[] = [
   { value: "typical_hot_day", label: "Typical Hot Day (synthetic)" },
@@ -101,7 +105,7 @@ export default function ProjectWorkspacePage() {
   const [speciesCatalogue, setSpeciesCatalogue] = useState<Record<string, SpeciesInfo>>({});
   const [surfaceCatalogue, setSurfaceCatalogue] = useState<Record<string, SurfaceInfo>>({});
 
-  const [activeTool, setActiveTool] = useState<"none" | "bbox" | "tree" | "surface">("none");
+  const [activeTool, setActiveTool] = useState<"none" | "bbox" | "tree" | "surface" | "building">("none");
   const [treeSpecies, setTreeSpecies] = useState("tilia_cordata");
   const [surfaceMaterial, setSurfaceMaterial] = useState("grass");
   const [submitting, setSubmitting] = useState(false);
@@ -119,6 +123,15 @@ export default function ProjectWorkspacePage() {
   const isOwner = membersList.some(
     (m) => m.role === "owner" && m.email === currentUserEmail
   );
+
+  // Building editor
+  const [resolvedBuildings, setResolvedBuildings] = useState<ResolvedBuilding[]>([]);
+  const [selectedBuildingId, setSelectedBuildingId] = useState<string | null>(null);
+  const [newBuildingHeight, setNewBuildingHeight] = useState(12);
+  const [newBuildingRoof, setNewBuildingRoof] = useState<RoofType>("flat");
+  const [newBuildingMaterial, setNewBuildingMaterial] = useState("concrete");
+  const [modifyHeight, setModifyHeight] = useState(12);
+  const [buildingEditError, setBuildingEditError] = useState("");
 
   // Forcing files
   const [forcingFiles, setForcingFiles] = useState<ForcingFile[]>([]);
@@ -193,6 +206,11 @@ export default function ProjectWorkspacePage() {
     setScenario(rec.scenario_json);
     setIsNew(false);
     setValidationIssues([]);
+    setSelectedBuildingId(null);
+    // Load resolved buildings for the selected scenario
+    buildingEditsApi.getResolved(projectId, rec.id)
+      .then((data) => setResolvedBuildings(data.buildings))
+      .catch(() => setResolvedBuildings([]));
   }
 
   function startNew(type: ScenarioType) {
@@ -342,6 +360,109 @@ export default function ProjectWorkspacePage() {
     }
   }
 
+  // --- Building edit handlers ---
+
+  async function loadResolvedBuildings() {
+    if (!selectedId) return;
+    try {
+      const data = await buildingEditsApi.getResolved(projectId, selectedId);
+      setResolvedBuildings(data.buildings);
+    } catch {
+      // scenario may not have buildings_edits yet
+      setResolvedBuildings([]);
+    }
+  }
+
+  async function handleBuildingDrawComplete(polygon: number[][]) {
+    if (!selectedId) return;
+    setBuildingEditError("");
+
+    // Ensure scenario has buildings_edits initialised
+    if (!scenario.buildings_edits) {
+      const updated = {
+        ...scenario,
+        buildings_edits: {
+          base_source: "osm",
+          base_snapshot_id: "osm-default",
+          edits: [],
+        },
+      };
+      try {
+        await scenariosApi.update(projectId, selectedId, updated);
+        setScenario(updated);
+      } catch (err: unknown) {
+        setBuildingEditError(err instanceof Error ? err.message : "Failed to init buildings_edits");
+        return;
+      }
+    }
+
+    try {
+      const result = await buildingEditsApi.appendEdit(projectId, selectedId, {
+        op: "add",
+        geometry: { type: "Polygon", coordinates: [polygon] },
+        height_m: newBuildingHeight,
+        roof_type: newBuildingRoof,
+        wall_material_id: newBuildingMaterial,
+      });
+      setResolvedBuildings(result.resolved.buildings);
+      setActiveTool("none");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to add building";
+      setBuildingEditError(msg);
+    }
+  }
+
+  async function handleBuildingModifyHeight() {
+    if (!selectedId || !selectedBuildingId) return;
+    setBuildingEditError("");
+
+    // Find the edit id for this building
+    const edits = scenario.buildings_edits?.edits ?? [];
+    const isEditBuilding = selectedBuildingId.startsWith("edit:");
+    const editId = isEditBuilding
+      ? selectedBuildingId.replace("edit:", "")
+      : null;
+
+    // For base buildings, we add a "modify" edit
+    const targetId = selectedBuildingId;
+    try {
+      const result = await buildingEditsApi.appendEdit(projectId, selectedId, {
+        op: "modify",
+        target_building_id: targetId,
+        set: { height_m: modifyHeight },
+      });
+      setResolvedBuildings(result.resolved.buildings);
+    } catch (err: unknown) {
+      setBuildingEditError(err instanceof Error ? err.message : "Failed to modify building");
+    }
+  }
+
+  async function handleBuildingRemove() {
+    if (!selectedId || !selectedBuildingId) return;
+    setBuildingEditError("");
+    try {
+      const result = await buildingEditsApi.appendEdit(projectId, selectedId, {
+        op: "remove",
+        target_building_id: selectedBuildingId,
+      });
+      setResolvedBuildings(result.resolved.buildings);
+      setSelectedBuildingId(null);
+    } catch (err: unknown) {
+      setBuildingEditError(err instanceof Error ? err.message : "Failed to remove building");
+    }
+  }
+
+  async function handleBuildingEditDelete(editId: string) {
+    if (!selectedId) return;
+    setBuildingEditError("");
+    try {
+      const result = await buildingEditsApi.deleteEdit(projectId, selectedId, editId);
+      setResolvedBuildings(result.resolved.buildings);
+    } catch (err: unknown) {
+      setBuildingEditError(err instanceof Error ? err.message : "Failed to undo edit");
+    }
+  }
+
   // --- Forcing file handlers ---
 
   async function loadForcingFiles() {
@@ -486,6 +607,7 @@ export default function ProjectWorkspacePage() {
               { id: "bbox" as const, label: "Define Study Area" },
               { id: "tree" as const, label: "Place Trees" },
               { id: "surface" as const, label: "Edit Surfaces" },
+              { id: "building" as const, label: "Edit Buildings" },
             ].map((tool) => (
               <button
                 key={tool.id}
@@ -535,6 +657,63 @@ export default function ProjectWorkspacePage() {
                   <option key={id} value={id}>{info.name}</option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {/* Building properties for building tool */}
+          {activeTool === "building" && (
+            <div className="mt-3 space-y-2" data-testid="building-tool-panel">
+              <p className="text-[10px] text-slate-400">
+                Draw a polygon on the map, then double-click to finish.
+              </p>
+              <div>
+                <label className="block text-[10px] text-slate-400">Height (m)</label>
+                <input
+                  type="number"
+                  value={newBuildingHeight}
+                  onChange={(e) => setNewBuildingHeight(Number(e.target.value))}
+                  min={2}
+                  max={300}
+                  step={1}
+                  data-testid="building-height-input"
+                  className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-400">Roof type</label>
+                <select
+                  value={newBuildingRoof}
+                  onChange={(e) => setNewBuildingRoof(e.target.value as RoofType)}
+                  data-testid="building-roof-select"
+                  className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+                >
+                  <option value="flat">Flat</option>
+                  <option value="pitched">Pitched</option>
+                  <option value="hipped">Hipped</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-400">Wall material</label>
+                <select
+                  value={newBuildingMaterial}
+                  onChange={(e) => setNewBuildingMaterial(e.target.value)}
+                  data-testid="building-material-select"
+                  className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+                >
+                  <option value="concrete">Concrete</option>
+                  <option value="brick">Brick</option>
+                  <option value="glass">Glass</option>
+                  <option value="steel">Steel</option>
+                  <option value="wood">Wood</option>
+                  <option value="stone">Stone</option>
+                </select>
+              </div>
+              {buildingEditError && (
+                <p className="text-red-500 text-[10px]" data-testid="building-edit-error">
+                  {buildingEditError}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -841,6 +1020,12 @@ export default function ProjectWorkspacePage() {
               onBboxComplete={handleBboxComplete}
               onTreePlace={handleTreePlace}
               onSurfaceComplete={handleSurfaceComplete}
+              onBuildingComplete={handleBuildingDrawComplete}
+            />
+            <BuildingEditor
+              buildings={resolvedBuildings}
+              selectedId={selectedBuildingId}
+              onSelect={setSelectedBuildingId}
             />
           </MapContainer>
           {/* Bbox info overlay */}
@@ -1035,6 +1220,120 @@ export default function ProjectWorkspacePage() {
               <p className="text-xs text-amber-500 mt-1">
                 Screening-level data: results are indicative only. Not suitable
                 for regulatory or design decisions.
+              </p>
+            )}
+          </section>
+
+          {/* Buildings (ADR-004) */}
+          <section data-testid="buildings-panel">
+            <h3 className="text-xs uppercase text-slate-500 font-semibold mb-2">
+              Buildings ({resolvedBuildings.length})
+            </h3>
+            {resolvedBuildings.length === 0 ? (
+              <p className="text-xs text-slate-500">
+                No buildings loaded. Use the &quot;Edit Buildings&quot; tool to add buildings.
+              </p>
+            ) : (
+              <div className="space-y-1 max-h-40 overflow-y-auto" data-testid="building-list">
+                {resolvedBuildings.map((b) => (
+                  <div
+                    key={b.building_id}
+                    onClick={() => setSelectedBuildingId(
+                      selectedBuildingId === b.building_id ? null : b.building_id
+                    )}
+                    className={`flex items-center justify-between rounded px-2 py-1 text-xs cursor-pointer transition-colors ${
+                      selectedBuildingId === b.building_id
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                    }`}
+                  >
+                    <span className="truncate flex-1">
+                      {b.building_id.length > 20
+                        ? b.building_id.slice(0, 20) + "..."
+                        : b.building_id}
+                      <span className="text-slate-400 ml-1">
+                        {b.height_m}m
+                      </span>
+                    </span>
+                    <span
+                      className={`ml-1 px-1 py-0.5 rounded text-[9px] font-bold uppercase ${
+                        b.source === "edit"
+                          ? "bg-amber-600 text-white"
+                          : "bg-slate-500 text-white"
+                      }`}
+                    >
+                      {b.source}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Selected building actions */}
+            {selectedBuildingId && (
+              <div className="mt-2 bg-slate-700 rounded p-2 space-y-1" data-testid="building-actions">
+                <p className="text-[10px] text-slate-400 font-semibold truncate">
+                  Selected: {selectedBuildingId}
+                </p>
+                <div className="flex gap-1">
+                  <input
+                    type="number"
+                    value={modifyHeight}
+                    onChange={(e) => setModifyHeight(Number(e.target.value))}
+                    min={2}
+                    max={300}
+                    data-testid="building-modify-height"
+                    className="w-20 bg-slate-600 border border-slate-500 rounded px-1 py-0.5 text-xs text-white"
+                  />
+                  <button
+                    onClick={handleBuildingModifyHeight}
+                    data-testid="building-modify-btn"
+                    className="text-xs bg-blue-600 hover:bg-blue-700 text-white rounded px-2 py-0.5 transition-colors"
+                  >
+                    Set height
+                  </button>
+                </div>
+                <button
+                  onClick={handleBuildingRemove}
+                  data-testid="building-remove-btn"
+                  className="w-full text-xs bg-red-700 hover:bg-red-600 text-white rounded px-2 py-1 transition-colors"
+                >
+                  Remove building
+                </button>
+              </div>
+            )}
+
+            {/* Edit history */}
+            {scenario.buildings_edits && scenario.buildings_edits.edits.length > 0 && (
+              <div className="mt-2" data-testid="building-edit-history">
+                <p className="text-[10px] text-slate-400 font-semibold mb-1">
+                  Edit history ({scenario.buildings_edits.edits.length})
+                </p>
+                <div className="space-y-0.5 max-h-24 overflow-y-auto">
+                  {scenario.buildings_edits.edits.map((e) => (
+                    <div
+                      key={e.id}
+                      className="flex items-center justify-between bg-slate-700 rounded px-2 py-0.5 text-[10px]"
+                    >
+                      <span className="text-slate-300">
+                        {e.op} &middot; {e.id}
+                      </span>
+                      <button
+                        onClick={() => handleBuildingEditDelete(e.id)}
+                        className="text-red-400 hover:text-red-300 ml-1"
+                        title="Undo this edit"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {buildingEditError && (
+              <p className="text-red-500 text-[10px] mt-1" data-testid="building-error-msg">
+                {buildingEditError}
               </p>
             )}
           </section>

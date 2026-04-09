@@ -53,6 +53,66 @@ export interface SimulationSettings {
   output_interval_s: number;
 }
 
+// Building geometry edits (ADR-004)
+
+export type RoofType = 'flat' | 'pitched' | 'hipped' | 'other';
+
+export interface BuildingEditAdd {
+  id: string;
+  op: 'add';
+  geometry: GeoJSONPolygon;
+  height_m: number;
+  roof_type: RoofType;
+  wall_material_id: string;
+  created_at?: string;
+  created_by?: number;
+}
+
+export interface BuildingEditModify {
+  id: string;
+  op: 'modify';
+  target_building_id: string;
+  set: Record<string, unknown>;
+  created_at?: string;
+  created_by?: number;
+}
+
+export interface BuildingEditRemove {
+  id: string;
+  op: 'remove';
+  target_building_id: string;
+  created_at?: string;
+  created_by?: number;
+}
+
+export type BuildingEdit = BuildingEditAdd | BuildingEditModify | BuildingEditRemove;
+
+export interface BuildingsEdits {
+  base_source: string;
+  base_snapshot_id: string;
+  edits: BuildingEdit[];
+}
+
+export interface GeoJSONPolygon {
+  type: 'Polygon';
+  coordinates: number[][][];
+}
+
+export interface ResolvedBuilding {
+  building_id: string;
+  geometry: GeoJSONPolygon;
+  height_m: number;
+  roof_type: string;
+  wall_material_id: string | null;
+  source: 'base' | 'edit';
+}
+
+export interface ResolvedBuildingsResponse {
+  base_snapshot_id: string | null;
+  edit_count: number;
+  buildings: ResolvedBuilding[];
+}
+
 export interface Scenario {
   schema_version?: string;
   name: string;
@@ -64,6 +124,7 @@ export interface Scenario {
   trees: TreePlacement[];
   surface_changes: SurfaceChange[];
   green_roofs: GreenRoof[];
+  buildings_edits?: BuildingsEdits | null;
 }
 
 export interface ValidationIssue {
