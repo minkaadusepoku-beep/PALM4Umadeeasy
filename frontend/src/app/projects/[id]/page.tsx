@@ -3,13 +3,20 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
+  auth,
   projects as projectsApi,
   scenarios as scenariosApi,
   catalogues,
   jobs as jobsApi,
+  members as membersApi,
+  forcing as forcingApi,
+  facadeGreeningAdvisory,
 } from "@/lib/api";
+import type { ForcingFile, FacadeGreeningAdvisory } from "@/lib/api";
 import type {
   Project,
+  ProjectMember,
+  ProjectRole,
   ScenarioRecord,
   Scenario,
   ScenarioType,
@@ -104,6 +111,27 @@ export default function ProjectWorkspacePage() {
   const [grVegType, setGrVegType] = useState("sedum");
   const [grDepth, setGrDepth] = useState(0.1);
 
+  // Members
+  const [membersList, setMembersList] = useState<ProjectMember[]>([]);
+  const [newMemberEmail, setNewMemberEmail] = useState("");
+  const [newMemberRole, setNewMemberRole] = useState<'viewer' | 'editor'>("viewer");
+  const [currentUserEmail, setCurrentUserEmail] = useState("");
+  const isOwner = membersList.some(
+    (m) => m.role === "owner" && m.email === currentUserEmail
+  );
+
+  // Forcing files
+  const [forcingFiles, setForcingFiles] = useState<ForcingFile[]>([]);
+  const [forcingUploading, setForcingUploading] = useState(false);
+  const forcingFileRef = useRef<HTMLInputElement>(null);
+
+  // Facade greening advisory
+  const [advisoryArea, setAdvisoryArea] = useState(50);
+  const [advisorySpecies, setAdvisorySpecies] = useState("hedera_helix");
+  const [advisoryCoverage, setAdvisoryCoverage] = useState(1.0);
+  const [advisoryResult, setAdvisoryResult] = useState<FacadeGreeningAdvisory | null>(null);
+  const [advisoryLoading, setAdvisoryLoading] = useState(false);
+
   const validateTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Load project + scenarios + catalogues
@@ -118,16 +146,21 @@ export default function ProjectWorkspacePage() {
       scenariosApi.list(projectId),
       catalogues.species(),
       catalogues.surfaces(),
-    ]).then(([proj, scens, species, surfaces]) => {
+      membersApi.list(projectId),
+    ]).then(([proj, scens, species, surfaces, mems]) => {
       setProject(proj);
       setScenarioList(scens);
       setSpeciesCatalogue(species);
       setSurfaceCatalogue(surfaces);
+      setMembersList(mems);
+      forcingApi.list(projectId).then(setForcingFiles).catch(() => {});
       if (scens.length > 0) {
         setSelectedId(scens[0].id);
         setScenario(scens[0].scenario_json);
       }
     }).catch((err) => setError(err.message));
+
+    auth.me().then((u) => setCurrentUserEmail(u.email)).catch(() => {});
   }, [projectId, router]);
 
   // Debounced validation
@@ -287,6 +320,79 @@ export default function ProjectWorkspacePage() {
     const roofs = [...scenario.green_roofs];
     roofs.splice(idx, 1);
     updateScenario({ green_roofs: roofs });
+  }
+
+  async function handleAddMember() {
+    if (!newMemberEmail.trim()) return;
+    try {
+      const member = await membersApi.add(projectId, newMemberEmail.trim(), newMemberRole);
+      setMembersList((prev) => [...prev, member]);
+      setNewMemberEmail("");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to add member");
+    }
+  }
+
+  async function handleRemoveMember(memberId: number) {
+    try {
+      await membersApi.remove(projectId, memberId);
+      setMembersList((prev) => prev.filter((m) => m.id !== memberId));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to remove member");
+    }
+  }
+
+  // --- Forcing file handlers ---
+
+  async function loadForcingFiles() {
+    try {
+      setForcingFiles(await forcingApi.list(projectId));
+    } catch {
+      // may not exist for this project yet
+    }
+  }
+
+  async function handleForcingUpload() {
+    const file = forcingFileRef.current?.files?.[0];
+    if (!file) return;
+    setForcingUploading(true);
+    try {
+      await forcingApi.upload(projectId, file);
+      await loadForcingFiles();
+      if (forcingFileRef.current) forcingFileRef.current.value = "";
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setForcingUploading(false);
+    }
+  }
+
+  async function handleForcingDelete(id: number) {
+    try {
+      await forcingApi.remove(projectId, id);
+      setForcingFiles((prev) => prev.filter((f) => f.id !== id));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    }
+  }
+
+  // --- Facade greening advisory handler ---
+
+  async function runAdvisory() {
+    setAdvisoryLoading(true);
+    setAdvisoryResult(null);
+    try {
+      const result = await facadeGreeningAdvisory.estimate({
+        facade_area_m2: advisoryArea,
+        species: advisorySpecies,
+        coverage_fraction: advisoryCoverage,
+      });
+      setAdvisoryResult(result);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Advisory estimate failed");
+    } finally {
+      setAdvisoryLoading(false);
+    }
   }
 
   // Compute effective data quality tier
@@ -501,6 +607,220 @@ export default function ProjectWorkspacePage() {
               Add Green Roof
             </button>
           </div>
+        </div>
+
+        {/* Forcing Files */}
+        <div className="p-4 border-t border-slate-700">
+          <h3 className="text-xs uppercase text-slate-500 font-semibold mb-2">
+            Forcing Files
+          </h3>
+          {forcingFiles.length === 0 ? (
+            <p className="text-xs text-slate-500">No custom forcing files uploaded.</p>
+          ) : (
+            <div className="space-y-1 mb-2" data-testid="forcing-file-list">
+              {forcingFiles.map((f) => (
+                <div
+                  key={f.id}
+                  className="flex items-center justify-between bg-slate-700 rounded px-2 py-1 text-xs"
+                >
+                  <div className="truncate flex-1">
+                    <span className="font-medium">{f.filename}</span>
+                    <span className="text-slate-400 ml-1">
+                      ({(f.file_size / 1024).toFixed(0)} KB)
+                    </span>
+                    {f.validated && (
+                      <span className="ml-1 text-green-400 text-[10px]">validated</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleForcingDelete(f.id)}
+                    className="text-red-400 hover:text-red-300 ml-2"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2 flex gap-1">
+            <input
+              ref={forcingFileRef}
+              type="file"
+              accept=".nc,.NC,.nc4"
+              data-testid="forcing-file-input"
+              className="flex-1 text-xs text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-slate-600 file:text-white cursor-pointer"
+            />
+            <button
+              onClick={handleForcingUpload}
+              disabled={forcingUploading}
+              data-testid="forcing-upload-btn"
+              className="bg-slate-600 hover:bg-slate-500 text-white rounded px-3 py-1 text-xs transition-colors disabled:opacity-50"
+            >
+              {forcingUploading ? "..." : "Upload"}
+            </button>
+          </div>
+        </div>
+
+        {/* Facade Greening Advisory */}
+        <div className="p-4 border-t border-slate-700">
+          <h3 className="text-xs uppercase text-slate-500 font-semibold mb-2">
+            Facade Greening Advisory
+          </h3>
+          <div className="bg-amber-900/30 border border-amber-700 rounded p-2 mb-2">
+            <p className="text-amber-400 font-bold text-[10px]" data-testid="advisory-banner">
+              ADVISORY ESTIMATE — not based on PALM simulation
+            </p>
+          </div>
+          <div className="space-y-1">
+            <div>
+              <label className="block text-[10px] text-slate-400">Facade area (m&sup2;)</label>
+              <input
+                type="number"
+                value={advisoryArea}
+                onChange={(e) => setAdvisoryArea(Number(e.target.value))}
+                min={1}
+                max={5000}
+                data-testid="advisory-area"
+                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-slate-400">Species</label>
+              <select
+                value={advisorySpecies}
+                onChange={(e) => setAdvisorySpecies(e.target.value)}
+                data-testid="advisory-species"
+                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+              >
+                <option value="hedera_helix">Hedera helix</option>
+                <option value="parthenocissus_tricuspidata">Parthenocissus tricuspidata</option>
+                <option value="wisteria_sinensis">Wisteria sinensis</option>
+                <option value="fallopia_baldschuanica">Fallopia baldschuanica</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] text-slate-400">Coverage fraction</label>
+              <input
+                type="number"
+                value={advisoryCoverage}
+                onChange={(e) => setAdvisoryCoverage(Number(e.target.value))}
+                step={0.1}
+                min={0.1}
+                max={1.0}
+                data-testid="advisory-coverage"
+                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+              />
+            </div>
+            <button
+              onClick={runAdvisory}
+              disabled={advisoryLoading}
+              data-testid="advisory-run-btn"
+              className="w-full text-xs bg-amber-700 hover:bg-amber-600 text-white rounded px-2 py-1 transition-colors disabled:opacity-50"
+            >
+              {advisoryLoading ? "Estimating..." : "Run Advisory Estimate"}
+            </button>
+          </div>
+          {advisoryResult && (
+            <div className="mt-2 bg-amber-900/20 border border-amber-800 rounded p-2 text-xs space-y-1" data-testid="advisory-results">
+              <p className="text-amber-400 font-bold text-[10px]">
+                {advisoryResult.result_kind} | coupled_with_palm: {String(advisoryResult.coupled_with_palm)}
+              </p>
+              <div>
+                <span className="text-slate-400">Cooling:</span>{" "}
+                {advisoryResult.cooling_effect.delta_t_celsius.low.toFixed(1)} to{" "}
+                {advisoryResult.cooling_effect.delta_t_celsius.high.toFixed(1)} &deg;C
+              </div>
+              <div>
+                <span className="text-slate-400">Energy saving:</span>{" "}
+                {(advisoryResult.energy_savings.summer_cooling_load_reduction_fraction.low * 100).toFixed(0)}%
+                &ndash;{" "}
+                {(advisoryResult.energy_savings.summer_cooling_load_reduction_fraction.high * 100).toFixed(0)}%
+              </div>
+              {advisoryResult.pollutant_uptake.pollutants && (
+                <div>
+                  <span className="text-slate-400">Pollutant uptake:</span>
+                  {Object.entries(advisoryResult.pollutant_uptake.pollutants).map(
+                    ([pol, vals]) => (
+                      <span key={pol} className="ml-1">
+                        {pol}: {vals.central_kg_per_year.toFixed(3)} kg/yr
+                      </span>
+                    )
+                  )}
+                </div>
+              )}
+              <p className="text-[9px] text-slate-500 mt-1">{advisoryResult.disclaimer}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Team Members */}
+        <div className="p-4 border-t border-slate-700">
+          <h3 className="text-xs uppercase text-slate-500 font-semibold mb-2">
+            Team Members
+          </h3>
+          <div className="space-y-1 mb-2" data-testid="members-list">
+            {membersList.map((m) => (
+              <div
+                key={m.id}
+                className="flex items-center justify-between bg-slate-700 rounded px-2 py-1 text-xs"
+                data-testid={`member-${m.user_id}`}
+              >
+                <span className="truncate flex-1" title={m.email}>
+                  {m.email}
+                </span>
+                <span
+                  className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    m.role === "owner"
+                      ? "bg-amber-600 text-white"
+                      : m.role === "editor"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-500 text-white"
+                  }`}
+                >
+                  {m.role}
+                </span>
+                {m.role !== "owner" && isOwner && (
+                  <button
+                    onClick={() => handleRemoveMember(m.id)}
+                    className="text-red-400 hover:text-red-300 ml-1"
+                    title="Remove member"
+                  >
+                    &times;
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {isOwner && (
+            <div className="space-y-1" data-testid="add-member-form">
+              <input
+                type="email"
+                placeholder="user@example.com"
+                value={newMemberEmail}
+                onChange={(e) => setNewMemberEmail(e.target.value)}
+                data-testid="member-email-input"
+                className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white placeholder-slate-500"
+              />
+              <div className="flex gap-1">
+                <select
+                  value={newMemberRole}
+                  onChange={(e) => setNewMemberRole(e.target.value as 'viewer' | 'editor')}
+                  data-testid="member-role-select"
+                  className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-white"
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
+                <button
+                  onClick={handleAddMember}
+                  data-testid="add-member-btn"
+                  className="bg-blue-600 hover:bg-blue-700 text-white rounded px-3 py-1 text-xs transition-colors"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

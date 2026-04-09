@@ -18,6 +18,11 @@ from ..models.scenario import (
     GreenRoof, DataQualityTier,
 )
 from ..catalogues.loader import get_species, get_surface
+from .buildings import (
+    validate_buildings_edits,
+    downgraded_buildings_tier,
+)
+from ..snapshots.buildings import load_snapshot
 
 
 class Severity(str, Enum):
@@ -56,6 +61,7 @@ def validate_scenario(scenario: Scenario) -> ValidationResult:
     issues.extend(_check_trees(scenario))
     issues.extend(_check_surfaces(scenario))
     issues.extend(_check_green_roofs(scenario))
+    issues.extend(_check_buildings_edits(scenario))
     issues.extend(_check_simulation(scenario))
     issues.extend(_check_resource_limits(scenario))
     issues.extend(_check_data_quality(scenario))
@@ -354,6 +360,47 @@ def _check_green_roofs(scenario: Scenario) -> list[ValidationIssue]:
                 message=f"Vegetation type '{gr.vegetation_type}' is not standard. "
                         f"Expected: sedum, extensive, intensive, grass.",
             ))
+
+    return issues
+
+
+# --- Building geometry edit checks (ADR-004) ---
+
+def _check_buildings_edits(scenario: Scenario) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    edits_obj = scenario.buildings_edits
+    if edits_obj is None or not edits_obj.edits:
+        return issues
+
+    base_buildings = load_snapshot(edits_obj.base_snapshot_id)
+    result = validate_buildings_edits(scenario, base_buildings)
+    for err in result.errors:
+        issues.append(ValidationIssue(
+            code=f"buildings_edits.{err.code}",
+            severity=Severity.ERROR,
+            message=err.message,
+            context={"edit_id": err.edit_id},
+        ))
+    for warn in result.warnings:
+        issues.append(ValidationIssue(
+            code=f"buildings_edits.{warn.code}",
+            severity=Severity.WARNING,
+            message=warn.message,
+            context={"edit_id": warn.edit_id},
+        ))
+
+    # Provenance downgrade surfaces as INFO so users see why their tier
+    # changed even when no other issues were raised.
+    base_tier = scenario.data_sources.buildings.quality_tier
+    new_tier = downgraded_buildings_tier(base_tier, scenario, base_buildings)
+    if new_tier != base_tier:
+        issues.append(ValidationIssue(
+            code="buildings_edits.tier_downgraded",
+            severity=Severity.INFO,
+            message=f"Buildings tier downgraded from {base_tier.value} to "
+                    f"{new_tier.value} because the scenario contains user edits.",
+            context={"from": base_tier.value, "to": new_tier.value},
+        ))
 
     return issues
 

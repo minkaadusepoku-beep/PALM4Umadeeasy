@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import Enum
-from typing import Optional
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -132,6 +132,67 @@ class GreenRoof(BaseModel):
     vegetation_type: str = Field("sedum", description="extensive or intensive type")
 
 
+# --- Building geometry edits (ADR-004) ---
+#
+# Edits live INSIDE the scenario JSON so the document is fully reproducible.
+# Storage is WGS84 GeoJSON; metric validation reprojects to a local CRS.
+# Three v1 ops only: add, modify, remove. See ADR-004 §3.
+
+class RoofType(str, Enum):
+    flat = "flat"
+    pitched = "pitched"
+    hipped = "hipped"
+    other = "other"
+
+
+class BuildingEditAdd(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    op: Literal["add"]
+    geometry: dict[str, Any] = Field(..., description="GeoJSON Polygon (WGS84)")
+    height_m: float = Field(..., ge=2.0, le=300.0)
+    roof_type: RoofType = RoofType.flat
+    wall_material_id: str = Field(..., min_length=1, description="Required per ADR-004 §11.3")
+    created_at: Optional[str] = None
+    created_by: Optional[int] = None
+
+
+class BuildingEditModify(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    op: Literal["modify"]
+    target_building_id: str = Field(..., min_length=1)
+    set: dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    created_by: Optional[int] = None
+
+
+class BuildingEditRemove(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    op: Literal["remove"]
+    target_building_id: str = Field(..., min_length=1)
+    created_at: Optional[str] = None
+    created_by: Optional[int] = None
+
+
+BuildingEdit = Union[BuildingEditAdd, BuildingEditModify, BuildingEditRemove]
+
+
+class BuildingsEdits(BaseModel):
+    base_source: str = Field("osm", description="Origin of the base snapshot, e.g. 'osm'")
+    base_snapshot_id: str = Field(..., min_length=1, description="Stable id of the base snapshot")
+    edits: list[BuildingEdit] = Field(
+        default_factory=list,
+        json_schema_extra={"discriminator": "op"},
+    )
+
+    @field_validator("edits")
+    @classmethod
+    def _no_duplicate_ids(cls, v: list[BuildingEdit]) -> list[BuildingEdit]:
+        ids = [e.id for e in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("buildings_edits.edits contains duplicate edit ids")
+        return v
+
+
 # --- Simulation settings ---
 
 class SimulationSettings(BaseModel):
@@ -155,6 +216,7 @@ class Scenario(BaseModel):
     trees: list[TreePlacement] = Field(default_factory=list)
     surface_changes: list[SurfaceChange] = Field(default_factory=list)
     green_roofs: list[GreenRoof] = Field(default_factory=list)
+    buildings_edits: Optional[BuildingsEdits] = None
 
     def fingerprint(self) -> str:
         """Deterministic hash of the scenario for reproducibility tracking."""

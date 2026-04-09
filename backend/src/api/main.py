@@ -34,8 +34,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import CATALOGUE_DIR, PROJECT_ROOT
 from ..db.database import get_db, init_db
 from ..db.models import AuditLog, ForcingFile, Job, JobStatus, JobType, Project, ProjectMember, ProjectRole, ScenarioRecord, User
-from ..models.scenario import Scenario, ComparisonRequest
+from ..models.scenario import (
+    Scenario, ComparisonRequest, BuildingsEdits,
+    BuildingEditAdd, BuildingEditModify, BuildingEditRemove,
+)
 from ..validation.engine import validate_scenario
+from ..validation.buildings import (
+    validate_buildings_edits,
+    resolve_buildings,
+    downgraded_buildings_tier,
+)
+from ..snapshots.buildings import load_snapshot
 from ..catalogues.loader import load_species, load_surfaces, load_comfort_thresholds
 from ..monitoring.health import get_health
 from ..monitoring.metrics import collect_metrics
@@ -723,6 +732,252 @@ async def validate_scenario_endpoint(
             for i in vr.issues
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Building geometry edit routes (ADR-004 §7)
+# ---------------------------------------------------------------------------
+
+class _EditCreate(BaseModel):
+    op: str
+    id: str | None = None
+    geometry: dict | None = None
+    height_m: float | None = None
+    roof_type: str | None = None
+    wall_material_id: str | None = None
+    target_building_id: str | None = None
+    set: dict | None = None
+
+
+def _scenario_record(project_id: int, scenario_id: int, db: AsyncSession):
+    return db.execute(
+        select(ScenarioRecord).where(
+            ScenarioRecord.id == scenario_id,
+            ScenarioRecord.project_id == project_id,
+        )
+    )
+
+
+async def _load_scenario_or_404(project_id: int, scenario_id: int, db: AsyncSession) -> tuple[ScenarioRecord, Scenario]:
+    result = await _scenario_record(project_id, scenario_id, db)
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    scenario = Scenario(**json.loads(record.scenario_json))
+    return record, scenario
+
+
+def _next_edit_id(scenario: Scenario) -> str:
+    existing = (
+        {e.id for e in scenario.buildings_edits.edits}
+        if scenario.buildings_edits else set()
+    )
+    n = 1
+    while f"e{n}" in existing:
+        n += 1
+    return f"e{n}"
+
+
+def _persist_scenario(record: ScenarioRecord, scenario: Scenario) -> None:
+    record.scenario_json = scenario.model_dump_json()
+
+
+def _resolved_payload(scenario: Scenario) -> dict:
+    edits_obj = scenario.buildings_edits
+    base = load_snapshot(edits_obj.base_snapshot_id) if edits_obj else []
+    resolved = resolve_buildings(base, edits_obj)
+    return {
+        "base_snapshot_id": edits_obj.base_snapshot_id if edits_obj else None,
+        "edit_count": len(edits_obj.edits) if edits_obj else 0,
+        "buildings": [
+            {
+                "building_id": rb.building_id,
+                "geometry": rb.geometry,
+                "height_m": rb.height_m,
+                "roof_type": rb.roof_type,
+                "wall_material_id": rb.wall_material_id,
+                "source": rb.source,
+            }
+            for rb in resolved
+        ],
+    }
+
+
+@app.get("/api/projects/{project_id}/scenarios/{scenario_id}/buildings")
+async def get_resolved_buildings(
+    project_id: int,
+    scenario_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await _verify_project_access(project_id, user, db, min_role="viewer")
+    _, scenario = await _load_scenario_or_404(project_id, scenario_id, db)
+    return _resolved_payload(scenario)
+
+
+@app.post("/api/projects/{project_id}/scenarios/{scenario_id}/buildings/edits", status_code=201)
+async def append_building_edit(
+    project_id: int,
+    scenario_id: int,
+    body: _EditCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await _verify_project_access(project_id, user, db, min_role="editor")
+    record, scenario = await _load_scenario_or_404(project_id, scenario_id, db)
+
+    if scenario.buildings_edits is None:
+        raise HTTPException(
+            status_code=400,
+            detail="scenario.buildings_edits is not initialised; set base_snapshot_id first",
+        )
+
+    eid = body.id or _next_edit_id(scenario)
+    payload = body.model_dump(exclude_none=True)
+    payload["id"] = eid
+
+    try:
+        if body.op == "add":
+            edit = BuildingEditAdd(**payload)
+        elif body.op == "modify":
+            edit = BuildingEditModify(**payload)
+        elif body.op == "remove":
+            edit = BuildingEditRemove(**payload)
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown op {body.op!r}")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid edit: {exc}")
+
+    new_edits = list(scenario.buildings_edits.edits) + [edit]
+    scenario.buildings_edits = BuildingsEdits(
+        base_source=scenario.buildings_edits.base_source,
+        base_snapshot_id=scenario.buildings_edits.base_snapshot_id,
+        edits=new_edits,
+    )
+
+    base = load_snapshot(scenario.buildings_edits.base_snapshot_id)
+    result = validate_buildings_edits(scenario, base)
+    if not result.valid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "edit chain failed validation",
+                "errors": [
+                    {"edit_id": e.edit_id, "code": e.code, "message": e.message}
+                    for e in result.errors
+                ],
+            },
+        )
+
+    _persist_scenario(record, scenario)
+    await db.flush()
+    await log_action(db, user.id, "buildings.edit_append", "scenario_buildings", scenario_id, detail=eid)
+    return {
+        "edit_id": eid,
+        "warnings": [
+            {"edit_id": w.edit_id, "code": w.code, "message": w.message}
+            for w in result.warnings
+        ],
+        "resolved": _resolved_payload(scenario),
+    }
+
+
+@app.delete(
+    "/api/projects/{project_id}/scenarios/{scenario_id}/buildings/edits/{edit_id}",
+    status_code=200,
+)
+async def delete_building_edit(
+    project_id: int,
+    scenario_id: int,
+    edit_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await _verify_project_access(project_id, user, db, min_role="editor")
+    record, scenario = await _load_scenario_or_404(project_id, scenario_id, db)
+    if scenario.buildings_edits is None:
+        raise HTTPException(status_code=404, detail="no edits to delete")
+
+    new_edits = [e for e in scenario.buildings_edits.edits if e.id != edit_id]
+    if len(new_edits) == len(scenario.buildings_edits.edits):
+        raise HTTPException(status_code=404, detail=f"edit {edit_id!r} not found")
+
+    scenario.buildings_edits = BuildingsEdits(
+        base_source=scenario.buildings_edits.base_source,
+        base_snapshot_id=scenario.buildings_edits.base_snapshot_id,
+        edits=new_edits,
+    )
+
+    base = load_snapshot(scenario.buildings_edits.base_snapshot_id)
+    result = validate_buildings_edits(scenario, base)
+    if not result.valid:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "deleting this edit invalidates a later edit; "
+                           "remove the dependent edit first",
+                "errors": [
+                    {"edit_id": e.edit_id, "code": e.code, "message": e.message}
+                    for e in result.errors
+                ],
+            },
+        )
+
+    _persist_scenario(record, scenario)
+    await db.flush()
+    await log_action(db, user.id, "buildings.edit_delete", "scenario_buildings", scenario_id, detail=edit_id)
+    return {"deleted": edit_id, "resolved": _resolved_payload(scenario)}
+
+
+class _ReorderRequest(BaseModel):
+    ordered_ids: list[str]
+
+
+@app.post("/api/projects/{project_id}/scenarios/{scenario_id}/buildings/edits:reorder")
+async def reorder_building_edits(
+    project_id: int,
+    scenario_id: int,
+    body: _ReorderRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await _verify_project_access(project_id, user, db, min_role="editor")
+    record, scenario = await _load_scenario_or_404(project_id, scenario_id, db)
+    if scenario.buildings_edits is None or not scenario.buildings_edits.edits:
+        raise HTTPException(status_code=404, detail="no edits to reorder")
+
+    edits_by_id = {e.id: e for e in scenario.buildings_edits.edits}
+    if set(body.ordered_ids) != set(edits_by_id.keys()):
+        raise HTTPException(
+            status_code=422,
+            detail="ordered_ids must contain exactly the same ids as the existing edits",
+        )
+
+    reordered = [edits_by_id[i] for i in body.ordered_ids]
+    scenario.buildings_edits = BuildingsEdits(
+        base_source=scenario.buildings_edits.base_source,
+        base_snapshot_id=scenario.buildings_edits.base_snapshot_id,
+        edits=reordered,
+    )
+
+    base = load_snapshot(scenario.buildings_edits.base_snapshot_id)
+    result = validate_buildings_edits(scenario, base)
+    if not result.valid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "the requested order is not valid",
+                "errors": [
+                    {"edit_id": e.edit_id, "code": e.code, "message": e.message}
+                    for e in result.errors
+                ],
+            },
+        )
+
+    _persist_scenario(record, scenario)
+    await db.flush()
+    await log_action(db, user.id, "buildings.edit_reorder", "scenario_buildings", scenario_id)
+    return {"resolved": _resolved_payload(scenario)}
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,10 @@
 # ADR-004: Building Geometry Editing
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-04-08
+**Accepted:** 2026-04-09
 **Author:** Minka Aduse-Poku
-**Blocks:** Implementation item 3.13
+**Unblocks:** Implementation item 3.13
 
 ## Context
 
@@ -293,6 +294,35 @@ scenario before and after each kind of edit.
 
 These are not blockers for accepting the ADR; they are flagged for
 the implementation PR review.
+
+## 11. Resolutions at acceptance (2026-04-09)
+
+The four open questions in §10 are resolved as follows for v1. Any
+future revision must update this ADR rather than silently changing
+the validator constants.
+
+1. **`min_building_area_m2 = 9`** — kept as proposed. This is the
+   smallest footprint that can be resolved on a 2 m grid without
+   degenerate single-cell buildings; raising it to municipal-cadastre
+   levels (~25 m²) would silently reject valid small structures
+   (kiosks, gatehouses, garden buildings) that genuinely affect
+   pedestrian-level wind. We accept the lower bar and rely on the
+   provenance downgrade in §6 to flag heavily edited scenarios.
+2. **Overlap tolerance** — single global value of `0.5 m` for v1. No
+   per-project override. Rationale: the tolerance exists to absorb
+   GeoJSON rounding noise, not to express a domain preference, so it
+   does not belong in user-facing config.
+3. **`add` requires `wall_material_id`** — kept strict. An added
+   building with no declared wall material would silently inherit the
+   project default and produce a result the user did not consciously
+   choose. Forcing the explicit choice is the more scientifically
+   honest default and matches the spirit of ADR-000.
+4. **Provenance thresholds (30 m, 1000 m²)** — kept as proposed for
+   v1. These are the thresholds at which an added building stops
+   being a "small infill edit" and starts being a structure that
+   dominates its block's microclimate. If the building data quality
+   module later publishes its own thresholds, this ADR will be
+   superseded on this point only.
 
 ## References
 
