@@ -230,7 +230,10 @@ def _safe_extract(archive: Path, dest: Path) -> None:
             member_path = (dest / member.name).resolve()
             if not str(member_path).startswith(str(dest_resolved)):
                 raise ValueError(f"Unsafe tar member path: {member.name}")
-        tar.extractall(dest)
+        # ``filter="data"`` is the hardened extractor (Python 3.12+) that
+        # strips setuid bits, absolute paths, and device files. Combined
+        # with our own prefix check above, this is defence in depth.
+        tar.extractall(dest, filter="data")
 
 
 def _pack_outputs(output_dir: Path, archive: Path) -> None:

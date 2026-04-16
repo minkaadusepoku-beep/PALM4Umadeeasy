@@ -7,6 +7,12 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import (
+    PALM_REMOTE_TOKEN,
+    PALM_REMOTE_URL,
+    PALM_RUNNER_MODE,
+    PALM_VERSION,
+)
 from ..db.models import Job, JobStatus
 
 
@@ -66,15 +72,55 @@ def check_disk() -> dict:
         return {"status": "unhealthy", "error": str(e)}
 
 
+def check_palm_runner() -> dict:
+    """
+    Report the PALM execution backend (ADR-005).
+
+    Status semantics:
+      healthy  — the mode is configured well enough to dispatch a run.
+      degraded — mode is set but prerequisites are missing (e.g. remote
+                 without URL/token). The app will still start; runs will
+                 fail loudly when submitted.
+    """
+    mode = PALM_RUNNER_MODE
+    info: dict = {"mode": mode, "palm_version": PALM_VERSION}
+
+    if mode == "stub":
+        info["status"] = "healthy"
+        info["note"] = "synthetic output; not a real PALM simulation"
+        return info
+    if mode == "remote":
+        info["remote_url"] = PALM_REMOTE_URL or None
+        info["token_configured"] = bool(PALM_REMOTE_TOKEN)
+        if not PALM_REMOTE_URL or not PALM_REMOTE_TOKEN:
+            info["status"] = "degraded"
+            info["error"] = (
+                "remote mode requires PALM_REMOTE_URL and PALM_REMOTE_TOKEN"
+            )
+        else:
+            info["status"] = "healthy"
+        return info
+    if mode == "local":
+        info["status"] = "healthy"
+        info["note"] = "in-process mpirun (Linux only)"
+        return info
+
+    info["status"] = "degraded"
+    info["error"] = f"unknown PALM_RUNNER_MODE: {mode!r}"
+    return info
+
+
 async def get_health(db: AsyncSession) -> dict:
     db_health = await check_db(db)
     queue_health = await check_queue(db)
     disk_health = check_disk()
+    palm_runner_health = check_palm_runner()
 
     components = {
         "database": db_health,
         "queue": queue_health,
         "disk": disk_health,
+        "palm_runner": palm_runner_health,
     }
 
     statuses = [c["status"] for c in components.values()]

@@ -77,6 +77,49 @@ class TestHealth:
         assert "free_gb" in disk
         assert "pct_free" in disk
 
+    @pytest.mark.asyncio
+    async def test_health_reports_palm_runner_mode(self, client):
+        """
+        ADR-005: operators must be able to see which PALM backend is active
+        from /health alone. Default env in tests is stub mode — assert that
+        the component renders cleanly and exposes the mode label.
+        """
+        resp = await client.get("/api/health")
+        runner = resp.json()["components"]["palm_runner"]
+        assert runner["status"] == "healthy"
+        assert runner["mode"] == "stub"
+        assert "palm_version" in runner
+
+    def test_palm_runner_remote_without_config_is_degraded(self, monkeypatch):
+        from src.monitoring import health as health_mod
+
+        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "remote")
+        monkeypatch.setattr(health_mod, "PALM_REMOTE_URL", "")
+        monkeypatch.setattr(health_mod, "PALM_REMOTE_TOKEN", "")
+        info = health_mod.check_palm_runner()
+        assert info["status"] == "degraded"
+        assert info["mode"] == "remote"
+        assert info["token_configured"] is False
+
+    def test_palm_runner_remote_with_config_is_healthy(self, monkeypatch):
+        from src.monitoring import health as health_mod
+
+        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "remote")
+        monkeypatch.setattr(health_mod, "PALM_REMOTE_URL", "http://worker:8765")
+        monkeypatch.setattr(health_mod, "PALM_REMOTE_TOKEN", "tok")
+        info = health_mod.check_palm_runner()
+        assert info["status"] == "healthy"
+        assert info["remote_url"] == "http://worker:8765"
+        assert info["token_configured"] is True
+
+    def test_palm_runner_unknown_mode_is_degraded(self, monkeypatch):
+        from src.monitoring import health as health_mod
+
+        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "bogus")
+        info = health_mod.check_palm_runner()
+        assert info["status"] == "degraded"
+        assert "unknown" in info["error"].lower()
+
 
 class TestMetrics:
     @pytest.mark.asyncio
