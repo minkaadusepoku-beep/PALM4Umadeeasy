@@ -1,5 +1,6 @@
 """Global configuration for PALM4Umadeeasy backend."""
 
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -19,3 +20,16 @@ DEFAULT_NZ = 40
 
 # Bio-met output height target (VDI 3787: 1.1m, hardcoded in PALM)
 BIOMET_TARGET_HEIGHT_M = 1.1
+
+# --- PALM execution backend (ADR-005) --------------------------------------
+# PALM_RUNNER_MODE selects how run_palm() dispatches:
+#   "stub"   — synthetic NetCDF generator (default, Windows-safe)
+#   "remote" — HTTP to a Linux worker; requires PALM_REMOTE_URL + PALM_REMOTE_TOKEN
+#   "local"  — in-process mpirun on the current (Linux) host
+PALM_RUNNER_MODE = os.environ.get("PALM_RUNNER_MODE", "stub").strip().lower()
+PALM_REMOTE_URL = os.environ.get("PALM_REMOTE_URL", "").strip()
+PALM_REMOTE_TOKEN = os.environ.get("PALM_REMOTE_TOKEN", "").strip()
+# Poll cadence (seconds) the remote client uses while waiting on the Linux worker.
+PALM_REMOTE_POLL_INTERVAL_S = float(os.environ.get("PALM_REMOTE_POLL_INTERVAL_S", "5"))
+# Hard cap on how long the remote client will wait for a single run (seconds).
+PALM_REMOTE_TIMEOUT_S = float(os.environ.get("PALM_REMOTE_TIMEOUT_S", "7200"))

@@ -1,10 +1,15 @@
 """
 PALM execution runner.
 
-Phase 1: stubbed for Windows development. Generates synthetic output
-matching PALM's output format so the full spine can be tested end-to-end.
+Dispatches to one of three backends based on ``PALM_RUNNER_MODE`` (or the
+legacy ``stub`` boolean kept for backward compatibility):
 
-Phase 2: real PALM submission via SSH/Slurm on a Linux cloud VM.
+- ``stub``   — synthetic NetCDF generator for Windows-only development and CI
+- ``remote`` — POST inputs to a remote Linux worker (see ADR-005), poll, download
+- ``local``  — run ``mpirun palm`` directly in-process (Linux-only)
+
+See ``docs/decisions/ADR-005-windows-prep-linux-worker.md`` for the architectural
+decision behind the split.
 """
 
 from __future__ import annotations
@@ -17,7 +22,12 @@ from typing import Optional
 import netCDF4 as nc
 import numpy as np
 
-from ..config import BIOMET_TARGET_HEIGHT_M
+from ..config import (
+    BIOMET_TARGET_HEIGHT_M,
+    PALM_REMOTE_TOKEN,
+    PALM_REMOTE_URL,
+    PALM_RUNNER_MODE,
+)
 
 
 class RunStatus(str, Enum):
@@ -28,6 +38,12 @@ class RunStatus(str, Enum):
     STUBBED = "stubbed"
 
 
+class RunnerMode(str, Enum):
+    STUB = "stub"
+    REMOTE = "remote"
+    LOCAL = "local"
+
+
 @dataclass
 class RunResult:
     status: RunStatus
@@ -36,14 +52,41 @@ class RunResult:
     output_files: dict[str, Path]
     message: str = ""
     wall_time_s: Optional[float] = None
+    # Reproducibility metadata: populated by remote/local backends with the
+    # exact PALM version/build flags reported by the Linux worker. Stub runs
+    # leave this as None.
+    palm_version: Optional[str] = None
+    palm_build_flags: Optional[str] = None
+
+
+def _resolve_mode(stub: Optional[bool], mode: Optional[str | RunnerMode]) -> RunnerMode:
+    """
+    Determine the effective runner mode.
+
+    Precedence (high → low):
+    1. Explicit ``mode`` argument
+    2. Legacy ``stub`` boolean (True → STUB; False → fall through)
+    3. ``PALM_RUNNER_MODE`` environment setting
+    4. Default ``STUB``
+    """
+    if mode is not None:
+        return RunnerMode(mode) if not isinstance(mode, RunnerMode) else mode
+    if stub is True:
+        return RunnerMode.STUB
+    if stub is False:
+        # Caller explicitly disabled stub but didn't pick a mode: respect env
+        env_mode = RunnerMode(PALM_RUNNER_MODE)
+        return env_mode if env_mode != RunnerMode.STUB else RunnerMode.LOCAL
+    return RunnerMode(PALM_RUNNER_MODE)
 
 
 def run_palm(
     case_name: str,
     input_files: dict[str, Path],
     output_dir: Path,
-    stub: bool = True,
+    stub: Optional[bool] = True,
     seed: int = 0,
+    mode: Optional[str | RunnerMode] = None,
 ) -> RunResult:
     """
     Execute a PALM simulation.
@@ -52,21 +95,70 @@ def run_palm(
         case_name: PALM case name (used for file naming)
         input_files: dict with keys "namelist", "static_driver", "dynamic_driver"
         output_dir: directory to write PALM output
-        stub: if True, generate synthetic output (Windows dev mode)
+        stub: legacy flag; True forces the synthetic generator, False defers to
+              ``mode``/``PALM_RUNNER_MODE``. Kept so existing callers don't break.
         seed: RNG seed for deterministic stub output (derived from scenario fingerprint)
+        mode: explicit runner mode; overrides ``stub`` and the env default.
 
     Returns:
         RunResult with status and output file paths.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    effective_mode = _resolve_mode(stub, mode)
 
-    if stub:
+    if effective_mode == RunnerMode.STUB:
         return _run_stub(case_name, input_files, output_dir, seed=seed)
+    if effective_mode == RunnerMode.REMOTE:
+        return _run_remote(case_name, input_files, output_dir)
+    if effective_mode == RunnerMode.LOCAL:
+        return _run_local(case_name, input_files, output_dir)
 
-    # Phase 2: real PALM execution
+    raise ValueError(f"Unknown runner mode: {effective_mode!r}")
+
+
+def _run_remote(
+    case_name: str, input_files: dict[str, Path], output_dir: Path,
+) -> RunResult:
+    """Delegate execution to a remote Linux worker (see ADR-005)."""
+    # Imported lazily so stub-only tests don't require httpx at import time.
+    from .remote_client import RemoteRunnerClient, RemoteRunnerError
+
+    if not PALM_REMOTE_URL:
+        raise RuntimeError(
+            "PALM_RUNNER_MODE=remote but PALM_REMOTE_URL is not set. "
+            "Configure the Linux worker URL before running."
+        )
+    if not PALM_REMOTE_TOKEN:
+        raise RuntimeError(
+            "PALM_RUNNER_MODE=remote but PALM_REMOTE_TOKEN is not set. "
+            "A shared bearer token is required (see ADR-005 §Auth model)."
+        )
+
+    client = RemoteRunnerClient(base_url=PALM_REMOTE_URL, token=PALM_REMOTE_TOKEN)
+    try:
+        return client.run(case_name, input_files, output_dir)
+    except RemoteRunnerError as exc:
+        return RunResult(
+            status=RunStatus.FAILED,
+            case_name=case_name,
+            output_dir=output_dir,
+            output_files={},
+            message=f"Remote PALM worker error: {exc}",
+        )
+
+
+def _run_local(
+    case_name: str, input_files: dict[str, Path], output_dir: Path,
+) -> RunResult:
+    """
+    Run ``mpirun palm`` directly on the current (Linux) host.
+
+    Stubbed until PALM is compiled on the target Linux machine. See ADR-005
+    Phase B for the activation criteria.
+    """
     raise NotImplementedError(
-        "Real PALM execution requires a Linux environment with PALM compiled. "
-        "Set stub=True for development, or implement SSH/Slurm submission."
+        "Local PALM execution requires a Linux environment with PALM compiled. "
+        "This branch is activated in ADR-005 Phase B. For now use stub or remote mode."
     )
 
 
