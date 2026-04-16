@@ -1,0 +1,42 @@
+# docker-compose for the PALM4Umadeeasy Linux worker (ADR-005).
+#
+# Development / small-scale deployment. For production, front this with
+# nginx + TLS (Phase C). Build from the repo root:
+#
+#   docker compose -f linux_worker/deploy/docker-compose.yml up -d --build
+#
+# The worker listens on 127.0.0.1:8765 by default; change the port mapping
+# only when you have firewalled access upstream.
+
+services:
+  palm-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: palm4u/linux-worker:latest
+    container_name: palm-worker
+    restart: unless-stopped
+    ports:
+      # Bind to loopback by default; expose publicly only via a reverse proxy.
+      - "127.0.0.1:8765:8765"
+    environment:
+      # Required. Must match PALM_REMOTE_TOKEN on the Windows client.
+      # Set this in a .env file next to this compose file, don't hardcode.
+      PALM_WORKER_TOKEN: "${PALM_WORKER_TOKEN:?set PALM_WORKER_TOKEN in .env}"
+      # stub for Phase A; mpirun once PALM is compiled in a derived image.
+      PALM_WORKER_MODE: "${PALM_WORKER_MODE:-stub}"
+      PALM_BINARY: "${PALM_BINARY:-palm}"
+      PALM_MPI_NP: "${PALM_MPI_NP:-4}"
+      PALM_VERSION_LABEL: "${PALM_VERSION_LABEL:-23.10}"
+      PALM_BUILD_FLAGS: "${PALM_BUILD_FLAGS:-}"
+    volumes:
+      - palm-worker-jobs:/var/lib/palm-worker/jobs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  palm-worker-jobs:

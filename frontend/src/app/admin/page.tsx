@@ -16,6 +16,16 @@ interface HealthData {
   components: Record<string, { status: string; [key: string]: unknown }>;
 }
 
+interface PalmRunnerComponent {
+  status: string;
+  mode?: string;
+  palm_version?: string;
+  remote_url?: string | null;
+  token_configured?: boolean;
+  note?: string;
+  error?: string;
+}
+
 interface AuditEntry {
   id: number;
   user_id: number | null;
@@ -162,6 +172,89 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* PALM Runner (ADR-005) */}
+      <section className="bg-white rounded-lg border p-4" data-testid="palm-runner-panel">
+        <h2 className="text-lg font-semibold mb-3">PALM Execution Backend</h2>
+        {health && (() => {
+          const runner = health.components.palm_runner as PalmRunnerComponent | undefined;
+          if (!runner) {
+            return <p className="text-sm text-slate-500">Runner status not reported by backend.</p>;
+          }
+          const mode = runner.mode ?? "unknown";
+          const modeLabel: Record<string, string> = {
+            stub: "Stub (synthetic output)",
+            remote: "Remote Linux worker",
+            local: "In-process mpirun",
+          };
+          const modeDescription: Record<string, string> = {
+            stub: "No real PALM simulation. Outputs are synthetic NetCDF for pipeline testing. Results in the UI and reports are labelled accordingly.",
+            remote: "PALM runs on a separate Linux host. Inputs are sent over HTTPS and outputs are fetched back automatically.",
+            local: "PALM runs in-process on this host (Linux only).",
+          };
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span
+                  className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
+                    STATUS_COLORS[runner.status] || "text-slate-600 bg-slate-50"
+                  }`}
+                  data-testid="palm-runner-status"
+                >
+                  {runner.status.toUpperCase()}
+                </span>
+                <span className="text-sm">
+                  Mode:{" "}
+                  <strong data-testid="palm-runner-mode">{modeLabel[mode] ?? mode}</strong>
+                </span>
+                {runner.palm_version && (
+                  <span className="text-sm text-slate-500">PALM v{runner.palm_version}</span>
+                )}
+              </div>
+
+              {modeDescription[mode] && (
+                <p className="text-xs text-slate-500">{modeDescription[mode]}</p>
+              )}
+
+              {mode === "remote" && (
+                <div className="border rounded p-3 bg-slate-50 text-sm space-y-1">
+                  <div>
+                    Worker URL:{" "}
+                    <code className="text-xs bg-white px-1.5 py-0.5 rounded border">
+                      {runner.remote_url || "(not set)"}
+                    </code>
+                  </div>
+                  <div>
+                    Shared token:{" "}
+                    <span
+                      className={
+                        runner.token_configured ? "text-green-600" : "text-red-600"
+                      }
+                    >
+                      {runner.token_configured ? "configured" : "missing"}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {runner.error && (
+                <p className="text-sm text-red-600" data-testid="palm-runner-error">
+                  {runner.error}
+                </p>
+              )}
+
+              {mode === "stub" && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                  Stub mode is active. To run real PALM simulations, set{" "}
+                  <code>PALM_RUNNER_MODE=remote</code> (plus{" "}
+                  <code>PALM_REMOTE_URL</code> and <code>PALM_REMOTE_TOKEN</code>) on
+                  the backend and restart. See ADR-005 for details.
+                </p>
+              )}
+            </div>
+          );
+        })()}
       </section>
 
       {/* Queue Stats */}
