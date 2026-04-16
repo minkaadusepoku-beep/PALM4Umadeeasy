@@ -174,3 +174,27 @@ class ForcingFile(Base):
 
     project = relationship("Project")
     user = relationship("User")
+
+
+class PalmRunnerConfig(Base):
+    """
+    Runtime-editable PALM runner configuration (ADR-005).
+
+    Exactly one row (id=1). Lets admins reconfigure the Linux worker URL and
+    bearer token from the UI without restarting the backend. When no row
+    exists, the runner falls back to the ``PALM_RUNNER_MODE`` / ``PALM_REMOTE_*``
+    environment variables. When a row exists, its fields take precedence and
+    the env vars only act as defaults for unset fields.
+
+    The bearer token is stored in plaintext because the worker verifies it
+    as a shared secret; treat ``palm4u.db`` as sensitive and back it up
+    accordingly.
+    """
+    __tablename__ = "palm_runner_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String, nullable=True)           # stub | remote | local; NULL = inherit env
+    remote_url = Column(String, nullable=True)
+    remote_token = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    updated_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)

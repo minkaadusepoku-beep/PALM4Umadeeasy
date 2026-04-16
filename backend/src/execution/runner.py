@@ -24,9 +24,6 @@ import numpy as np
 
 from ..config import (
     BIOMET_TARGET_HEIGHT_M,
-    PALM_REMOTE_TOKEN,
-    PALM_REMOTE_URL,
-    PALM_RUNNER_MODE,
 )
 
 
@@ -66,18 +63,25 @@ def _resolve_mode(stub: Optional[bool], mode: Optional[str | RunnerMode]) -> Run
     Precedence (high → low):
     1. Explicit ``mode`` argument
     2. Legacy ``stub`` boolean (True → STUB; False → fall through)
-    3. ``PALM_RUNNER_MODE`` environment setting
-    4. Default ``STUB``
+    3. Resolved runtime config (DB row preferred, else env, else default)
+       — see ``settings.load_config_sync``.
     """
     if mode is not None:
         return RunnerMode(mode) if not isinstance(mode, RunnerMode) else mode
     if stub is True:
         return RunnerMode.STUB
+
+    # Lazy import to avoid a circular import at module load — settings.py
+    # imports from ..db.models which doesn't depend on runner.
+    from .settings import load_config_sync
+
+    resolved = load_config_sync()
     if stub is False:
-        # Caller explicitly disabled stub but didn't pick a mode: respect env
-        env_mode = RunnerMode(PALM_RUNNER_MODE)
-        return env_mode if env_mode != RunnerMode.STUB else RunnerMode.LOCAL
-    return RunnerMode(PALM_RUNNER_MODE)
+        # Caller explicitly disabled stub but didn't pick a mode: respect the
+        # resolved config, but if it still says stub, assume they meant local.
+        effective = RunnerMode(resolved.mode)
+        return effective if effective != RunnerMode.STUB else RunnerMode.LOCAL
+    return RunnerMode(resolved.mode)
 
 
 def run_palm(
@@ -122,19 +126,24 @@ def _run_remote(
     """Delegate execution to a remote Linux worker (see ADR-005)."""
     # Imported lazily so stub-only tests don't require httpx at import time.
     from .remote_client import RemoteRunnerClient, RemoteRunnerError
+    from .settings import load_config_sync
 
-    if not PALM_REMOTE_URL:
+    resolved = load_config_sync()
+    if not resolved.remote_url:
         raise RuntimeError(
-            "PALM_RUNNER_MODE=remote but PALM_REMOTE_URL is not set. "
-            "Configure the Linux worker URL before running."
+            "PALM runner mode is 'remote' but no worker URL is configured. "
+            "Set it in the admin panel (/admin) or via PALM_REMOTE_URL."
         )
-    if not PALM_REMOTE_TOKEN:
+    if not resolved.remote_token:
         raise RuntimeError(
-            "PALM_RUNNER_MODE=remote but PALM_REMOTE_TOKEN is not set. "
-            "A shared bearer token is required (see ADR-005 §Auth model)."
+            "PALM runner mode is 'remote' but no bearer token is configured. "
+            "Set it in the admin panel (/admin) or via PALM_REMOTE_TOKEN."
         )
 
-    client = RemoteRunnerClient(base_url=PALM_REMOTE_URL, token=PALM_REMOTE_TOKEN)
+    client = RemoteRunnerClient(
+        base_url=resolved.remote_url,
+        token=resolved.remote_token,
+    )
     try:
         return client.run(case_name, input_files, output_dir)
     except RemoteRunnerError as exc:

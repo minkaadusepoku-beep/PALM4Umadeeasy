@@ -432,7 +432,60 @@ export const admin = {
     if (statusFilter) params.set('status_filter', statusFilter);
     return apiFetch<AdminJob[]>(`/admin/jobs?${params}`);
   },
+
+  getPalmRunner() {
+    return apiFetch<PalmRunnerConfig>('/admin/palm-runner');
+  },
+
+  savePalmRunner(body: {
+    mode: string | null;
+    remote_url: string | null;
+    remote_token: string | null;
+  }) {
+    return apiFetch<PalmRunnerConfig>('/admin/palm-runner', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  },
+
+  testPalmRunner(body?: { remote_url?: string; remote_token?: string }) {
+    return apiFetch<PalmRunnerTestResult>('/admin/palm-runner/test', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  },
 };
+
+// Shape of GET /admin/palm-runner (no raw token ever returned).
+export interface PalmRunnerConfig {
+  mode: string;
+  mode_source: 'db' | 'env' | 'default';
+  remote_url: string | null;
+  remote_url_source: 'db' | 'env' | 'unset';
+  token_configured: boolean;
+  remote_token_source: 'db' | 'env' | 'unset';
+}
+
+export interface PalmRunnerTestResult {
+  ok: boolean;
+  http_status: number | null;
+  url?: string;
+  error?: string;
+  worker?: Record<string, unknown>;
+}
+
+// Lightweight, non-admin routing hint for the scenario editor's Run button.
+export interface RunnerInfo {
+  mode: string;
+  label: string;
+  remote_url: string | null;
+  token_configured: boolean;
+  ready: boolean;
+}
+
+export function getRunnerInfo() {
+  return apiFetch<RunnerInfo>('/runner-info');
+}
 
 // ---------------------------------------------------------------------------
 // Forcing files

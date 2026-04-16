@@ -25,6 +25,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.execution import runner as runner_mod
+from src.execution import settings as settings_mod
+from src.execution.settings import ResolvedRunnerConfig
 from src.execution.runner import (
     RunnerMode,
     RunResult,
@@ -32,6 +34,20 @@ from src.execution.runner import (
     _resolve_mode,
     run_palm,
 )
+
+
+def _patch_resolved(monkeypatch, *, mode: str, remote_url: str = "", remote_token: str = ""):
+    """Force settings.load_config_sync() to return a known config for tests."""
+    def _fake() -> ResolvedRunnerConfig:
+        return ResolvedRunnerConfig(
+            mode=mode,
+            remote_url=remote_url,
+            remote_token=remote_token,
+            mode_source="env",
+            remote_url_source="env" if remote_url else "unset",
+            remote_token_source="env" if remote_token else "unset",
+        )
+    monkeypatch.setattr(settings_mod, "load_config_sync", _fake)
 
 
 # ---------------------------------------------------------------------------
@@ -47,18 +63,18 @@ class TestResolveMode:
     def test_stub_true_forces_stub(self):
         assert _resolve_mode(stub=True, mode=None) == RunnerMode.STUB
 
-    def test_stub_false_defers_to_env_but_never_stays_stub(self, monkeypatch):
-        # If env says "stub" but caller explicitly passed stub=False, we must
-        # not silently keep running in stub — fall back to local instead.
-        monkeypatch.setattr(runner_mod, "PALM_RUNNER_MODE", "stub")
+    def test_stub_false_defers_to_config_but_never_stays_stub(self, monkeypatch):
+        # If resolved config says "stub" but caller explicitly passed stub=False,
+        # we must not silently keep running in stub — fall back to local instead.
+        _patch_resolved(monkeypatch, mode="stub")
         assert _resolve_mode(stub=False, mode=None) == RunnerMode.LOCAL
 
-    def test_stub_false_respects_non_stub_env(self, monkeypatch):
-        monkeypatch.setattr(runner_mod, "PALM_RUNNER_MODE", "remote")
+    def test_stub_false_respects_non_stub_config(self, monkeypatch):
+        _patch_resolved(monkeypatch, mode="remote", remote_url="x", remote_token="t")
         assert _resolve_mode(stub=False, mode=None) == RunnerMode.REMOTE
 
-    def test_defaults_to_env(self, monkeypatch):
-        monkeypatch.setattr(runner_mod, "PALM_RUNNER_MODE", "remote")
+    def test_defaults_to_resolved_config(self, monkeypatch):
+        _patch_resolved(monkeypatch, mode="remote", remote_url="x", remote_token="t")
         assert _resolve_mode(stub=None, mode=None) == RunnerMode.REMOTE
 
     def test_unknown_mode_raises(self):
@@ -113,10 +129,9 @@ class TestRunPalmDispatch:
             )
 
     def test_remote_mode_without_url_fails_loudly(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(runner_mod, "PALM_REMOTE_URL", "")
-        monkeypatch.setattr(runner_mod, "PALM_REMOTE_TOKEN", "tok")
+        _patch_resolved(monkeypatch, mode="remote", remote_url="", remote_token="tok")
         static = _make_static_driver(tmp_path)
-        with pytest.raises(RuntimeError, match="PALM_REMOTE_URL"):
+        with pytest.raises(RuntimeError, match="worker URL"):
             run_palm(
                 case_name="case",
                 input_files={"static_driver": static},
@@ -125,10 +140,11 @@ class TestRunPalmDispatch:
             )
 
     def test_remote_mode_without_token_fails_loudly(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(runner_mod, "PALM_REMOTE_URL", "http://worker:8765")
-        monkeypatch.setattr(runner_mod, "PALM_REMOTE_TOKEN", "")
+        _patch_resolved(
+            monkeypatch, mode="remote", remote_url="http://worker:8765", remote_token=""
+        )
         static = _make_static_driver(tmp_path)
-        with pytest.raises(RuntimeError, match="PALM_REMOTE_TOKEN"):
+        with pytest.raises(RuntimeError, match="bearer token"):
             run_palm(
                 case_name="case",
                 input_files={"static_driver": static},

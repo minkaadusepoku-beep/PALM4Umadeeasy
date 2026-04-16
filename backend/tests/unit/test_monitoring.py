@@ -90,35 +90,70 @@ class TestHealth:
         assert runner["mode"] == "stub"
         assert "palm_version" in runner
 
-    def test_palm_runner_remote_without_config_is_degraded(self, monkeypatch):
-        from src.monitoring import health as health_mod
-
-        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "remote")
-        monkeypatch.setattr(health_mod, "PALM_REMOTE_URL", "")
-        monkeypatch.setattr(health_mod, "PALM_REMOTE_TOKEN", "")
-        info = health_mod.check_palm_runner()
-        assert info["status"] == "degraded"
+    @pytest.mark.asyncio
+    async def test_palm_runner_remote_without_config_is_degraded(self, monkeypatch, client):
+        """Remote mode from env but no URL/token → degraded, error surfaced."""
+        monkeypatch.setenv("PALM_RUNNER_MODE", "remote")
+        monkeypatch.setenv("PALM_REMOTE_URL", "")
+        monkeypatch.setenv("PALM_REMOTE_TOKEN", "")
+        resp = await client.get("/api/health")
+        info = resp.json()["components"]["palm_runner"]
         assert info["mode"] == "remote"
+        assert info["mode_source"] == "env"
         assert info["token_configured"] is False
-
-    def test_palm_runner_remote_with_config_is_healthy(self, monkeypatch):
-        from src.monitoring import health as health_mod
-
-        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "remote")
-        monkeypatch.setattr(health_mod, "PALM_REMOTE_URL", "http://worker:8765")
-        monkeypatch.setattr(health_mod, "PALM_REMOTE_TOKEN", "tok")
-        info = health_mod.check_palm_runner()
-        assert info["status"] == "healthy"
-        assert info["remote_url"] == "http://worker:8765"
-        assert info["token_configured"] is True
-
-    def test_palm_runner_unknown_mode_is_degraded(self, monkeypatch):
-        from src.monitoring import health as health_mod
-
-        monkeypatch.setattr(health_mod, "PALM_RUNNER_MODE", "bogus")
-        info = health_mod.check_palm_runner()
         assert info["status"] == "degraded"
-        assert "unknown" in info["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_palm_runner_remote_with_config_is_healthy(self, monkeypatch, client):
+        """Remote mode with URL + token from env → healthy and sources reported."""
+        monkeypatch.setenv("PALM_RUNNER_MODE", "remote")
+        monkeypatch.setenv("PALM_REMOTE_URL", "http://worker:8765")
+        monkeypatch.setenv("PALM_REMOTE_TOKEN", "tok")
+        resp = await client.get("/api/health")
+        info = resp.json()["components"]["palm_runner"]
+        assert info["status"] == "healthy"
+        assert info["mode"] == "remote"
+        assert info["remote_url"] == "http://worker:8765"
+        assert info["remote_url_source"] == "env"
+        assert info["token_configured"] is True
+        assert info["remote_token_source"] == "env"
+
+    @pytest.mark.asyncio
+    async def test_palm_runner_unknown_mode_falls_back_to_stub(self, monkeypatch, client):
+        """Unknown mode value must not crash the app; falls back to stub."""
+        monkeypatch.setenv("PALM_RUNNER_MODE", "bogus")
+        resp = await client.get("/api/health")
+        info = resp.json()["components"]["palm_runner"]
+        assert info["mode"] == "stub"
+        assert info["status"] == "healthy"
+
+    @pytest.mark.asyncio
+    async def test_palm_runner_db_config_overrides_env(self, monkeypatch, client, db_engine):
+        """Admin-saved DB row must take precedence over env vars."""
+        from src.db.models import PalmRunnerConfig
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+
+        monkeypatch.setenv("PALM_RUNNER_MODE", "stub")
+        monkeypatch.setenv("PALM_REMOTE_URL", "")
+        monkeypatch.setenv("PALM_REMOTE_TOKEN", "")
+
+        Session = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as s:
+            s.add(PalmRunnerConfig(
+                mode="remote",
+                remote_url="http://db-configured:8765",
+                remote_token="db-token",
+            ))
+            await s.commit()
+
+        resp = await client.get("/api/health")
+        info = resp.json()["components"]["palm_runner"]
+        assert info["mode"] == "remote"
+        assert info["mode_source"] == "db"
+        assert info["remote_url"] == "http://db-configured:8765"
+        assert info["remote_url_source"] == "db"
+        assert info["token_configured"] is True
+        assert info["remote_token_source"] == "db"
 
 
 class TestMetrics:

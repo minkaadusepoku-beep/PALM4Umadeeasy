@@ -12,8 +12,9 @@ import {
   forcing as forcingApi,
   facadeGreeningAdvisory,
   buildingEdits as buildingEditsApi,
+  getRunnerInfo,
 } from "@/lib/api";
-import type { ForcingFile, FacadeGreeningAdvisory } from "@/lib/api";
+import type { ForcingFile, FacadeGreeningAdvisory, RunnerInfo } from "@/lib/api";
 import type {
   Project,
   ProjectMember,
@@ -109,6 +110,7 @@ export default function ProjectWorkspacePage() {
   const [treeSpecies, setTreeSpecies] = useState("tilia_cordata");
   const [surfaceMaterial, setSurfaceMaterial] = useState("grass");
   const [submitting, setSubmitting] = useState(false);
+  const [runnerInfo, setRunnerInfo] = useState<RunnerInfo | null>(null);
 
   // Green roof form
   const [grBuildingId, setGrBuildingId] = useState("");
@@ -174,6 +176,7 @@ export default function ProjectWorkspacePage() {
     }).catch((err) => setError(err.message));
 
     auth.me().then((u) => setCurrentUserEmail(u.email)).catch(() => {});
+    getRunnerInfo().then(setRunnerInfo).catch(() => {});
   }, [projectId, router]);
 
   // Debounced validation
@@ -1458,9 +1461,41 @@ export default function ProjectWorkspacePage() {
             >
               {saving ? "Saving..." : isNew ? "Create Scenario" : "Save Changes"}
             </button>
+
+            {/* Routing indicator — tell the user where this job will actually run */}
+            {runnerInfo && (
+              <div
+                data-testid="runner-indicator"
+                className={`text-xs rounded px-2 py-1.5 border ${
+                  runnerInfo.mode === "stub"
+                    ? "bg-amber-900/20 border-amber-700 text-amber-200"
+                    : runnerInfo.ready
+                    ? "bg-emerald-900/20 border-emerald-700 text-emerald-200"
+                    : "bg-red-900/20 border-red-700 text-red-200"
+                }`}
+              >
+                <span className="font-medium">Will run on:</span>{" "}
+                {runnerInfo.label}
+                {runnerInfo.mode === "stub" && (
+                  <span className="block text-[10px] opacity-80 mt-0.5">
+                    Output will be synthetic, not a real PALM simulation.
+                    Configure a remote Linux worker in{" "}
+                    <a href="/admin" className="underline">/admin</a>.
+                  </span>
+                )}
+                {runnerInfo.mode === "remote" && !runnerInfo.ready && (
+                  <span className="block text-[10px] opacity-80 mt-0.5">
+                    Remote worker is selected but the URL or token is missing.
+                    Configure in <a href="/admin" className="underline">/admin</a>{" "}
+                    before running.
+                  </span>
+                )}
+              </div>
+            )}
+
             <button
               onClick={handleRunSimulation}
-              disabled={submitting || !selectedId}
+              disabled={submitting || !selectedId || (runnerInfo != null && !runnerInfo.ready)}
               data-testid="run-simulation"
               className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors"
             >

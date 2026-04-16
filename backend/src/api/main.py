@@ -984,6 +984,47 @@ async def reorder_building_edits(
 # Job routes (/api/jobs)
 # ---------------------------------------------------------------------------
 
+
+@app.get("/api/runner-info")
+async def runner_info(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Lightweight read-only view of the active PALM runner.
+
+    Used by the scenario editor to label the Run Simulation button ("Will run
+    on: …") so editors know before clicking whether their job goes to the
+    stub generator or to a real Linux worker. Never leaks the token.
+    """
+    from ..execution.settings import load_config
+
+    resolved = await load_config(db)
+    if resolved.mode == "stub":
+        label = "Stub (synthetic output)"
+    elif resolved.mode == "remote":
+        if resolved.remote_url and resolved.token_configured:
+            label = f"Remote Linux worker — {resolved.remote_url}"
+        else:
+            label = "Remote Linux worker — NOT CONFIGURED"
+    elif resolved.mode == "local":
+        label = "Local mpirun"
+    else:
+        label = resolved.mode
+
+    return {
+        "mode": resolved.mode,
+        "label": label,
+        "remote_url": resolved.remote_url or None,
+        "token_configured": resolved.token_configured,
+        "ready": (
+            resolved.mode == "stub"
+            or (resolved.mode == "remote" and resolved.remote_url and resolved.token_configured)
+            or resolved.mode == "local"
+        ),
+    }
+
+
 @app.post("/api/jobs/run", response_model=JobResponse, status_code=202)
 async def run_job(
     body: RunJobRequest,
@@ -1886,6 +1927,158 @@ async def admin_list_jobs(
         }
         for j in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Admin: PALM runner configuration (ADR-005)
+# ---------------------------------------------------------------------------
+
+
+class PalmRunnerConfigPayload(BaseModel):
+    """
+    Admin-editable runner config.
+
+    ``None`` / missing fields clear that field in the DB and cause the
+    corresponding env var to take over again. ``remote_token`` is write-only:
+    we never return the raw token from GET, only whether one is configured.
+    """
+    mode: str | None = Field(default=None, description="stub | remote | local; null to inherit env")
+    remote_url: str | None = Field(default=None)
+    remote_token: str | None = Field(default=None)
+
+
+def _serialize_resolved(resolved) -> dict:
+    """Shape a ResolvedRunnerConfig for JSON responses — never leak the token."""
+    return {
+        "mode": resolved.mode,
+        "mode_source": resolved.mode_source,
+        "remote_url": resolved.remote_url or None,
+        "remote_url_source": resolved.remote_url_source,
+        "token_configured": resolved.token_configured,
+        "remote_token_source": resolved.remote_token_source,
+    }
+
+
+@app.get("/api/admin/palm-runner")
+async def admin_get_palm_runner(
+    user: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the currently effective PALM runner config (DB + env merged)."""
+    from ..execution.settings import load_config
+    resolved = await load_config(db)
+    return _serialize_resolved(resolved)
+
+
+@app.put("/api/admin/palm-runner")
+async def admin_put_palm_runner(
+    body: PalmRunnerConfigPayload,
+    request: Request,
+    actor: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Upsert the DB-backed runner config row."""
+    from ..execution.settings import save_config, VALID_MODES
+
+    if body.mode is not None and body.mode.strip() and body.mode.strip().lower() not in VALID_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode; must be one of {VALID_MODES} or null",
+        )
+
+    try:
+        resolved = await save_config(
+            db,
+            mode=body.mode,
+            remote_url=body.remote_url,
+            remote_token=body.remote_token,
+            actor_user_id=actor.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await log_action(
+        db,
+        user_id=actor.id,
+        action="palm_runner_config_update",
+        resource_type="palm_runner_config",
+        resource_id="1",
+        # Never log the token itself; only whether one is now set.
+        detail=(
+            f"mode={resolved.mode} url={resolved.remote_url or '—'} "
+            f"token_configured={resolved.token_configured}"
+        ),
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return _serialize_resolved(resolved)
+
+
+class PalmRunnerTestPayload(BaseModel):
+    """
+    Optional ad-hoc URL+token to probe without persisting. When omitted the
+    test uses whatever is currently saved / inherited from env.
+    """
+    remote_url: str | None = None
+    remote_token: str | None = None
+
+
+@app.post("/api/admin/palm-runner/test")
+async def admin_test_palm_runner(
+    body: PalmRunnerTestPayload | None = None,
+    user: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Probe the configured Linux worker's /health endpoint.
+
+    Lets the admin click "Test Connection" before saving, or re-verify a
+    saved config. Never raises 5xx — always returns JSON with ``ok: bool``
+    so the UI can render a friendly message.
+    """
+    from ..execution.settings import load_config
+
+    url = (body.remote_url if body and body.remote_url else None)
+    token = (body.remote_token if body and body.remote_token else None)
+
+    if not url or not token:
+        resolved = await load_config(db)
+        url = url or resolved.remote_url
+        token = token or resolved.remote_token
+
+    if not url:
+        return {"ok": False, "error": "No worker URL configured.", "http_status": None}
+    if not token:
+        return {"ok": False, "error": "No worker token configured.", "http_status": None}
+
+    probe_url = url.rstrip("/") + "/health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as ac:
+            resp = await ac.get(probe_url, headers={"Authorization": f"Bearer {token}"})
+    except httpx.RequestError as exc:
+        return {
+            "ok": False,
+            "error": f"connection failed: {type(exc).__name__}: {exc}",
+            "http_status": None,
+            "url": probe_url,
+        }
+
+    ok = resp.status_code == 200
+    payload: dict = {
+        "ok": ok,
+        "http_status": resp.status_code,
+        "url": probe_url,
+    }
+    if not ok:
+        payload["error"] = f"worker returned HTTP {resp.status_code}"
+    else:
+        # Surface the version string the worker advertises so the operator
+        # can verify they're talking to the right Linux host.
+        try:
+            payload["worker"] = resp.json()
+        except Exception:
+            payload["worker"] = {}
+    return payload
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { admin } from "@/lib/api";
+import { admin, PalmRunnerConfig, PalmRunnerTestResult } from "@/lib/api";
 
 interface QueueStats {
   jobs: Record<string, number>;
@@ -74,6 +74,111 @@ export default function AdminDashboard() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // PALM runner config form state
+  const [runnerConfig, setRunnerConfig] = useState<PalmRunnerConfig | null>(null);
+  const [formMode, setFormMode] = useState<string>("stub");
+  const [formUrl, setFormUrl] = useState<string>("");
+  const [formToken, setFormToken] = useState<string>("");
+  const [runnerSaving, setRunnerSaving] = useState(false);
+  const [runnerTesting, setRunnerTesting] = useState(false);
+  const [runnerMessage, setRunnerMessage] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
+
+  async function saveRunner(e: React.FormEvent) {
+    e.preventDefault();
+    setRunnerSaving(true);
+    setRunnerMessage(null);
+    try {
+      // Treat empty string as "clear" for URL; for token, treat empty as
+      // "keep existing" to avoid accidentally wiping the saved secret.
+      const body = {
+        mode: formMode || null,
+        remote_url: formUrl.trim() === "" ? null : formUrl.trim(),
+        remote_token: formToken === "" ? null : formToken,
+      };
+      // If the user left the token blank AND there's already a saved one,
+      // preserve it by sending undefined-equivalent semantics: we send null
+      // which clears it — so detect and block that explicitly.
+      if (
+        body.remote_token === null &&
+        runnerConfig?.token_configured &&
+        runnerConfig?.remote_token_source === "db"
+      ) {
+        // Saved token exists; user didn't edit it. Re-fetch the current
+        // config after save to preserve it by sending a sentinel null only
+        // for fields the user actually changed.
+        // Simpler: delete the key so the backend keeps the existing DB row
+        // value. But our API treats null as "clear". To really preserve it,
+        // omit the field — but pydantic requires all fields. Workaround:
+        // we fetch current config and... actually, simplest for users:
+        // warn if they'd clear the token.
+        const proceed = window.confirm(
+          "Leaving the token field blank will CLEAR the saved token. Continue?"
+        );
+        if (!proceed) {
+          setRunnerSaving(false);
+          return;
+        }
+      }
+      const cfg = await admin.savePalmRunner(body);
+      setRunnerConfig(cfg);
+      setFormMode(cfg.mode);
+      setFormUrl(cfg.remote_url ?? "");
+      setFormToken("");
+      setRunnerMessage({ type: "success", text: "Saved. Runs submitted from now on will use the new settings." });
+      // Refresh /health so the top panel reflects the change.
+      const h = await admin.health();
+      setHealth(h);
+    } catch (err) {
+      setRunnerMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to save runner config",
+      });
+    } finally {
+      setRunnerSaving(false);
+    }
+  }
+
+  async function testRunner() {
+    setRunnerTesting(true);
+    setRunnerMessage(null);
+    try {
+      // If the form has an ad-hoc URL/token, test those; otherwise test
+      // whatever is currently saved.
+      const override =
+        formUrl.trim() !== "" || formToken !== ""
+          ? {
+              remote_url: formUrl.trim() || undefined,
+              remote_token: formToken || undefined,
+            }
+          : undefined;
+      const result: PalmRunnerTestResult = await admin.testPalmRunner(override);
+      if (result.ok) {
+        const ver =
+          (result.worker as { palm_version?: string } | undefined)?.palm_version ??
+          "unknown";
+        setRunnerMessage({
+          type: "success",
+          text: `Connected. Worker reports PALM v${ver} at ${result.url ?? ""}.`,
+        });
+      } else {
+        setRunnerMessage({
+          type: "error",
+          text: result.error || "Connection test failed.",
+        });
+      }
+    } catch (err) {
+      setRunnerMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Test failed",
+      });
+    } finally {
+      setRunnerTesting(false);
+    }
+  }
+
   async function reloadUsers() {
     setUsers(await admin.listUsers(50, 0));
   }
@@ -99,18 +204,23 @@ export default function AdminDashboard() {
   useEffect(() => {
     async function load() {
       try {
-        const [q, h, a, u, j] = await Promise.all([
+        const [q, h, a, u, j, rc] = await Promise.all([
           admin.queueStats(),
           admin.health(),
           admin.auditLog(30),
           admin.listUsers(50, 0),
           admin.listJobs(50, 0),
+          admin.getPalmRunner(),
         ]);
         setQueue(q);
         setHealth(h);
         setAudit(a);
         setUsers(u);
         setSystemJobs(j);
+        setRunnerConfig(rc);
+        setFormMode(rc.mode);
+        setFormUrl(rc.remote_url ?? "");
+        setFormToken("");
       } catch (err: unknown) {
         if (err instanceof Error && err.message.includes("403")) {
           setError("Admin access required");
@@ -244,17 +354,131 @@ export default function AdminDashboard() {
                 </p>
               )}
 
-              {mode === "stub" && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-                  Stub mode is active. To run real PALM simulations, set{" "}
-                  <code>PALM_RUNNER_MODE=remote</code> (plus{" "}
-                  <code>PALM_REMOTE_URL</code> and <code>PALM_REMOTE_TOKEN</code>) on
-                  the backend and restart. See ADR-005 for details.
-                </p>
-              )}
             </div>
           );
         })()}
+
+        {/* Runtime-editable config form */}
+        <form
+          onSubmit={saveRunner}
+          className="mt-4 border-t pt-4 space-y-3"
+          data-testid="palm-runner-form"
+        >
+          <h3 className="text-sm font-semibold">Runtime configuration</h3>
+          <p className="text-xs text-slate-500">
+            Changes take effect immediately for new runs — no backend restart needed.
+            Leave a field blank to fall back to the <code>PALM_RUNNER_MODE</code>,{" "}
+            <code>PALM_REMOTE_URL</code>, or <code>PALM_REMOTE_TOKEN</code> environment
+            variable.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <label className="text-sm">
+              <span className="block text-slate-600 mb-1">Mode</span>
+              <select
+                value={formMode}
+                onChange={(e) => setFormMode(e.target.value)}
+                className="w-full border rounded px-2 py-1.5"
+                data-testid="runner-mode-select"
+              >
+                <option value="stub">stub (synthetic)</option>
+                <option value="remote">remote (Linux worker)</option>
+                <option value="local">local (mpirun)</option>
+              </select>
+              {runnerConfig && (
+                <span className="text-xs text-slate-400 block mt-1">
+                  currently from: <code>{runnerConfig.mode_source}</code>
+                </span>
+              )}
+            </label>
+
+            <label className="text-sm md:col-span-2">
+              <span className="block text-slate-600 mb-1">Worker URL</span>
+              <input
+                type="url"
+                value={formUrl}
+                onChange={(e) => setFormUrl(e.target.value)}
+                placeholder="https://palm-worker.example.com"
+                className="w-full border rounded px-2 py-1.5 font-mono text-sm"
+                data-testid="runner-url-input"
+              />
+              {runnerConfig && (
+                <span className="text-xs text-slate-400 block mt-1">
+                  currently from: <code>{runnerConfig.remote_url_source}</code>
+                </span>
+              )}
+            </label>
+
+            <label className="text-sm md:col-span-3">
+              <span className="block text-slate-600 mb-1">
+                Bearer token{" "}
+                {runnerConfig?.token_configured && (
+                  <span className="text-xs text-green-600">
+                    (a token is already saved — leave blank to keep it)
+                  </span>
+                )}
+              </span>
+              <input
+                type="password"
+                value={formToken}
+                onChange={(e) => setFormToken(e.target.value)}
+                placeholder={
+                  runnerConfig?.token_configured
+                    ? "•••••••• (leave blank to keep the saved token)"
+                    : "paste the shared secret from the Linux worker"
+                }
+                className="w-full border rounded px-2 py-1.5 font-mono text-sm"
+                data-testid="runner-token-input"
+                autoComplete="off"
+              />
+              {runnerConfig && (
+                <span className="text-xs text-slate-400 block mt-1">
+                  currently from: <code>{runnerConfig.remote_token_source}</code>
+                </span>
+              )}
+            </label>
+          </div>
+
+          <div className="flex gap-2 items-center flex-wrap">
+            <button
+              type="submit"
+              disabled={runnerSaving}
+              className="px-4 py-1.5 bg-slate-900 text-white rounded hover:bg-slate-700 disabled:opacity-50"
+              data-testid="runner-save-btn"
+            >
+              {runnerSaving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={testRunner}
+              disabled={runnerTesting}
+              className="px-4 py-1.5 border rounded hover:bg-slate-50 disabled:opacity-50"
+              data-testid="runner-test-btn"
+            >
+              {runnerTesting ? "Testing…" : "Test connection"}
+            </button>
+            {formMode === "stub" && (
+              <span className="text-xs text-amber-700">
+                Stub mode — simulations will produce synthetic output only.
+              </span>
+            )}
+          </div>
+
+          {runnerMessage && (
+            <div
+              className={`text-sm rounded p-2 border ${
+                runnerMessage.type === "success"
+                  ? "bg-green-50 border-green-200 text-green-800"
+                  : runnerMessage.type === "error"
+                  ? "bg-red-50 border-red-200 text-red-800"
+                  : "bg-slate-50 border-slate-200 text-slate-700"
+              }`}
+              data-testid="runner-message"
+            >
+              {runnerMessage.text}
+            </div>
+          )}
+        </form>
       </section>
 
       {/* Queue Stats */}

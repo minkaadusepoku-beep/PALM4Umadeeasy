@@ -7,13 +7,9 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import (
-    PALM_REMOTE_TOKEN,
-    PALM_REMOTE_URL,
-    PALM_RUNNER_MODE,
-    PALM_VERSION,
-)
+from ..config import PALM_VERSION
 from ..db.models import Job, JobStatus
+from ..execution.settings import load_config
 
 
 async def check_db(db: AsyncSession) -> dict:
@@ -72,30 +68,44 @@ def check_disk() -> dict:
         return {"status": "unhealthy", "error": str(e)}
 
 
-def check_palm_runner() -> dict:
+async def check_palm_runner(db: AsyncSession) -> dict:
     """
     Report the PALM execution backend (ADR-005).
+
+    Reads the merged config (DB row if present, else env vars) so the UI
+    shows exactly what ``run_palm()`` will use. ``*_source`` fields tell
+    the operator whether each value came from the admin panel (``db``)
+    or the environment.
 
     Status semantics:
       healthy  — the mode is configured well enough to dispatch a run.
       degraded — mode is set but prerequisites are missing (e.g. remote
-                 without URL/token). The app will still start; runs will
+                 without URL/token). The app still starts; runs will
                  fail loudly when submitted.
     """
-    mode = PALM_RUNNER_MODE
-    info: dict = {"mode": mode, "palm_version": PALM_VERSION}
+    resolved = await load_config(db)
+    mode = resolved.mode
+
+    info: dict = {
+        "mode": mode,
+        "palm_version": PALM_VERSION,
+        "mode_source": resolved.mode_source,
+        "remote_url": resolved.remote_url or None,
+        "remote_url_source": resolved.remote_url_source,
+        "token_configured": resolved.token_configured,
+        "remote_token_source": resolved.remote_token_source,
+    }
 
     if mode == "stub":
         info["status"] = "healthy"
         info["note"] = "synthetic output; not a real PALM simulation"
         return info
     if mode == "remote":
-        info["remote_url"] = PALM_REMOTE_URL or None
-        info["token_configured"] = bool(PALM_REMOTE_TOKEN)
-        if not PALM_REMOTE_URL or not PALM_REMOTE_TOKEN:
+        if not resolved.remote_url or not resolved.remote_token:
             info["status"] = "degraded"
             info["error"] = (
-                "remote mode requires PALM_REMOTE_URL and PALM_REMOTE_TOKEN"
+                "remote mode requires a worker URL and bearer token "
+                "(set via /admin or PALM_REMOTE_URL / PALM_REMOTE_TOKEN)"
             )
         else:
             info["status"] = "healthy"
@@ -106,7 +116,7 @@ def check_palm_runner() -> dict:
         return info
 
     info["status"] = "degraded"
-    info["error"] = f"unknown PALM_RUNNER_MODE: {mode!r}"
+    info["error"] = f"unknown runner mode: {mode!r}"
     return info
 
 
@@ -114,7 +124,7 @@ async def get_health(db: AsyncSession) -> dict:
     db_health = await check_db(db)
     queue_health = await check_queue(db)
     disk_health = check_disk()
-    palm_runner_health = check_palm_runner()
+    palm_runner_health = await check_palm_runner(db)
 
     components = {
         "database": db_health,
